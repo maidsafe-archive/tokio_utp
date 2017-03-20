@@ -1,0 +1,15 @@
+[package]
+name = "utp"
+version = "0.1.0"
+authors = ["Carl Lerche <me@carllerche.com>"]
+
+[dependencies]
+mio = { git = "https://github.com/carllerche/mio", branch = "net-reorg" }
+bytes = "0.4"
+rand = "0.3"
+slab = { git = "https://github.com/carllerche/slab", branch = "rewrite" }
+byteorder = "1.0"
+log = "0.3.7"
+
+[dev-dependencies]
+env_logger = "0.4.2"
