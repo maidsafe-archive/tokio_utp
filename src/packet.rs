@@ -19,6 +19,7 @@ use std::{fmt, io};
 /// | seq_nr                        | ack_nr                        |
 /// +---------------+---------------+---------------+---------------+
 /// ```
+#[derive(Clone)]
 pub struct Packet {
     data: BytesMut,
 }
@@ -33,15 +34,16 @@ pub enum Type {
     Syn = 4,
 }
 
+pub const HEADER_LEN: usize = 20;
+
 const DEFAULT: [u8; 20] = [
     1, 0, 0, 0,
     0, 0, 0, 0,
-    0, 0, 0, 0,
-    0, 0, 0, 0,
+    255, 255, 255, 255, // Default timestamp difference
+    0, 1, 0, 0,         // Default window of 64kb
     0, 0, 0, 0];
 
 const VERSION_MASK: u8 = 0b1111;
-const HEADER_LEN: usize = 20;
 
 impl Packet {
     pub fn parse(packet: BytesMut) -> io::Result<Packet> {
@@ -175,6 +177,10 @@ impl Packet {
 
     pub fn as_slice(&self) -> &[u8] {
         &self.data[..]
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
     }
 }
 

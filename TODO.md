@@ -1,5 +1,7 @@
 # TODO
 
+* Issue deferred acks
+
 * `ST_RESET` packet handling
 * Handling packet loss
 * Congestion control
