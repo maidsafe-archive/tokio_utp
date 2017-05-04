@@ -87,6 +87,9 @@ struct Connection {
     // A combination of the send ID and the socket address
     key: Key,
 
+    // True when the `UtpStream` handle has been dropped
+    released: bool,
+
     // Used to signal readiness on the `UtpStream`
     set_readiness: SetReadiness,
 
@@ -135,6 +138,8 @@ enum State {
     // A SYN has been sent and we are currently waiting for an ACK before
     // closing the connection.
     FinSent,
+    // The connection has been reset by the remote.
+    Reset,
 }
 
 type InnerCell = Rc<RefCell<Inner>>;
@@ -269,8 +274,11 @@ impl UtpStream {
                     try!(connection.update_readiness());
                     Err(io::ErrorKind::WouldBlock.into())
                 } else if connection.state.is_closed() {
-                    // Connection is closed
-                    Ok(0)
+                    if connection.state == State::Reset {
+                        Err(io::ErrorKind::ConnectionReset.into())
+                    } else {
+                        Ok(0)
+                    }
                 } else {
                     unreachable!();
                 }
@@ -338,7 +346,7 @@ impl Inner {
                     // Connection is being closed, but there may be data in the
                     // buffer...
                 } else {
-                    unimplemented!();
+                    unreachable!();
                 }
 
                 try!(conn.update_readiness());
@@ -361,7 +369,6 @@ impl Inner {
             assert!(conn.state.is_closed(),
                     "expected closed state; actual={:?}", conn.state);
 
-            // TODO: What should this return
             return Err(io::ErrorKind::BrokenPipe.into());
         }
 
@@ -427,6 +434,7 @@ impl Inner {
             in_queue: InQueue::new(None),
             our_delays: Delays::new(),
             their_delays: Delays::new(),
+            released: false,
             deadline: Some(now + Duration::from_millis(DEFAULT_TIMEOUT_MS)),
             last_maxed_out_window: now,
             average_delay: 0,
@@ -453,6 +461,7 @@ impl Inner {
     fn close(&mut self, token: usize) {
         let finalized = {
             let conn = &mut self.connections[token];
+            conn.released = true;
             conn.send_fin(false, &mut self.shared);
             conn.flush(&mut self.shared);
             conn.is_finalized()
@@ -468,9 +477,6 @@ impl Inner {
 
         // Update readiness
         self.shared.update_ready(ready);
-
-        // TODO: Ensure out_buf has enough capacity
-        // assert!(self.ready.is_writable() == self.out_buf_dst.is_none());
 
         loop {
             // Try to receive a packet
@@ -534,15 +540,20 @@ impl Inner {
                         };
 
                         if finalized {
-                            self.remove_connection(token);
+                            let conn = self.remove_connection(token);
                         }
 
                         Ok(())
                     }
                     None => {
                         trace!("no connection associated with ID; dropping packet");
-                        // Invalid packet... ignore it.
-                        // TODO: send RST
+
+                        // Send the RESET packet, ignoring errors...
+                        let mut p = Packet::reset();
+                        p.set_connection_id(packet.connection_id());
+
+                        let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+
                         return Ok(());
                     }
                 }
@@ -562,17 +573,17 @@ impl Inner {
 
         // TODO: If accept buffer is full, reset the connection
 
-        let (registration, set_readiness) = Registration::new2();
-
         let key = Key {
             receive_id: receive_id,
             addr: addr,
         };
 
         if self.connection_lookup.contains_key(&key) {
-            // TODO: What should happen here?
-            unimplemented!();
+            // Just ignore the packet...
+            return Ok(());
         }
+
+        let (registration, set_readiness) = Registration::new2();
 
         let now = Instant::now();
 
@@ -582,6 +593,7 @@ impl Inner {
             set_readiness: set_readiness,
             out_queue: OutQueue::new(send_id, seq_nr, Some(ack_nr)),
             in_queue: InQueue::new(Some(ack_nr)),
+            released: false,
             our_delays: Delays::new(),
             their_delays: Delays::new(),
             deadline: None,
@@ -675,6 +687,19 @@ impl Connection {
     fn process(&mut self, packet: Packet, shared: &mut Shared) -> io::Result<bool> {
         let now = Instant::now();
 
+        if self.state == State::Reset {
+            return Ok(self.is_finalized());
+        }
+
+        if packet.ty() == packet::Type::Reset {
+            self.state = State::Reset;
+
+            // Update readiness
+            try!(self.update_readiness());
+
+            return Ok(self.is_finalized());
+        }
+
         // TODO: Invalid packets should be discarded here.
 
         self.update_delays(now, &packet);
@@ -717,7 +742,7 @@ impl Connection {
             // queue
             match packet.ty() {
                 packet::Type::Reset => {
-                    panic!("unimplemented; recv `RESET`");
+                    self.state = State::Reset;
                 }
                 packet::Type::Fin => {
                     self.send_fin(true, shared);
@@ -750,6 +775,10 @@ impl Connection {
     fn flush(&mut self, shared: &mut Shared) {
         let mut sent = false;
 
+        if self.state == State::Reset {
+            return;
+        }
+
         while let Some(next) = self.out_queue.next() {
             if !shared.is_writable() {
                 return;
@@ -781,6 +810,10 @@ impl Connection {
     }
 
     fn tick(&mut self, shared: &mut Shared) -> io::Result<()> {
+        if self.state == State::Reset {
+            return Ok(());
+        }
+
         if let Some(deadline) = self.deadline {
             if Instant::now() >= deadline {
                 trace!("connection timed out; id={}", self.out_queue.connection_id());
@@ -968,7 +1001,9 @@ impl Connection {
     }
 
     fn is_finalized(&self) -> bool {
-        self.out_queue.is_empty() && self.state.is_closed()
+        self.released &&
+            ((self.out_queue.is_empty() && self.state.is_closed()) ||
+             self.state == State::Reset)
     }
 
     /// Update the UtpStream's readiness
@@ -1006,7 +1041,7 @@ impl Connection {
 impl State {
     fn is_closed(&self) -> bool {
         match *self {
-            State::FinSent => true,
+            State::FinSent | State::Reset => true,
             _ => false,
         }
     }

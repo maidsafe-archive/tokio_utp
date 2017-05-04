@@ -259,3 +259,67 @@ fn ignores_dup_packets() {
 
     th.join().unwrap();
 }
+
+#[test]
+fn remote_close() {
+    const CONNECTION_ID: u16 = 25103;
+
+    let _ = ::env_logger::init();
+    ::util::reset_rand();
+
+    let socket = Harness::new();
+    let mock = Mock::new();
+    let server = mock.local_addr();
+
+    let addr = socket.local_addr();
+    let th = mock.background(move |m| {
+        // Receive the SYN packet
+        let p = m.recv_from(&addr);
+
+        assert_eq!(p.ty(), packet::Type::Syn);
+
+        // Send the state packet representing the connection ACK
+        let mut p = Packet::state();
+        p.set_connection_id(CONNECTION_ID);
+        p.set_seq_nr(123);
+        p.set_ack_nr(1);
+
+        // Send the STATE packet
+        m.send_to(p, &addr);
+
+        // Send FIN
+        let mut p = Packet::fin();
+        p.set_connection_id(CONNECTION_ID);
+        p.set_seq_nr(124);
+        p.set_ack_nr(1);
+        m.send_to(p, &addr);
+
+        // Receive the FIN packet
+        let p = m.recv_from(&addr);
+        assert_eq!(p.ty(), packet::Type::Fin);
+        assert_eq!(p.seq_nr(), 2);
+        assert_eq!(p.ack_nr(), 124);
+
+        // Ack fin
+        let mut p = Packet::state();
+        p.set_connection_id(CONNECTION_ID);
+        p.set_seq_nr(124);
+        p.set_ack_nr(2);
+        m.send_to(p, &addr);
+    });
+
+    let stream = socket.connect(server);
+
+    // The socket becomes writable
+    socket.wait_until(|| stream.is_readable());
+
+    // Wait a bit more...
+    socket.tick_for(200);
+
+    let mut buf = [0; 128];
+    assert_eq!(0, stream.read(&mut buf).unwrap());
+
+    drop(stream);
+
+    th.join().unwrap();
+}

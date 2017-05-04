@@ -95,6 +95,12 @@ impl Packet {
         p
     }
 
+    pub fn reset() -> Packet {
+        let mut p = Packet::default();
+        p.set_ty(Type::Reset);
+        p
+    }
+
     fn ty_raw(&self) -> u8 {
         self.data[0] >> 4
     }

@@ -4,6 +4,7 @@
 mod mock;
 mod harness;
 
+mod test_err;
 mod test_flow;
 mod test_stream;
 mod test_timeout;

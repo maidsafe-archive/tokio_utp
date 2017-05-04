@@ -119,7 +119,8 @@ impl OutQueue {
     /// Returns true if the out queue is fully flushed and all packets have been
     /// ACKed.
     pub fn is_empty(&self) -> bool {
-        self.packets.is_empty()
+        // Only empty if all acks have been sent
+        self.packets.is_empty() && self.state.local_ack == self.state.last_ack
     }
 
     /// Whenever a packet is received, the included timestamp is passed in here.
