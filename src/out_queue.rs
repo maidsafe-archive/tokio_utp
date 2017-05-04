@@ -162,6 +162,12 @@ impl OutQueue {
             // If the packet has a payload, track the number of bytes sent
             acked_bytes += p.packet.payload().len();
 
+            if p.last_sent_at.is_none() {
+                // We timed out, but the ack arrived after the timeout... the
+                // packet is ACKed but don't use it for congestion control
+                continue;
+            }
+
             // Calculate the RTT for the packet.
             let packet_rtt = now.duration_since(p.last_sent_at.unwrap());
 
@@ -320,6 +326,7 @@ impl OutQueue {
     }
 
     pub fn set_max_window(&mut self, val: u32) {
+        trace!("set_max_window; old={:?}; new={:?}", self.max_window, val);
         self.max_window = val;
     }
 
@@ -338,15 +345,14 @@ impl OutQueue {
             return Ok(0);
         }
 
-        let cur_window = self.in_flight();
-        let max = cmp::min(self.max_window, self.peer_window) as usize;
+        let mut rem = self.remaining_capacity();
+        let mut len = 0;
 
-        if cur_window >= max {
+        if rem == 0 {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
-        let mut rem = max - cur_window;
-        let mut len = 0;
+        trace!("write; remaining={:?}; src={:?}", rem, src.len());
 
         while rem > HEADER_LEN {
             let packet_len = cmp::min(
@@ -369,21 +375,33 @@ impl OutQueue {
         Ok(len)
     }
 
-    pub fn is_writable(&self) -> bool {
-        self.buffered() < MAX_WINDOW_SIZE as usize
+    fn remaining_capacity(&self) -> usize {
+        let cur_window = self.buffered();
+        let max = cmp::min(self.max_window, self.peer_window) as usize;
+
+        if cur_window >= max {
+            return 0;
+        }
+
+        max - cur_window
     }
 
-    pub fn in_flight(&self) -> usize {
+    pub fn is_writable(&self) -> bool {
+        self.remaining_capacity() > 0
+    }
+
+    fn in_flight(&self) -> usize {
         // TODO: Don't iterate each time
         self.packets.iter()
             .filter(|p| p.last_sent_at.is_some() && !p.acked)
-            .count()
+            .map(|p| p.packet.len())
+            .sum()
     }
 
-    pub fn buffered(&self) -> usize {
+    fn buffered(&self) -> usize {
         // TODO: Don't iterate each time
         self.packets.iter()
-            .map(|p| p.packet.payload().len())
+            .map(|p| p.packet.len())
             .sum()
     }
 

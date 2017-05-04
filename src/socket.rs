@@ -107,7 +107,7 @@ struct Connection {
     their_delays: Delays,
 
     last_maxed_out_window: Instant,
-    average_delay: u32,
+    average_delay: i32,
     current_delay_sum: i64,
     current_delay_samples: i64,
     average_delay_base: u32,
@@ -368,6 +368,7 @@ impl Inner {
         match conn.out_queue.write(src) {
             Ok(n) => {
                 conn.flush(&mut self.shared);
+                try!(conn.update_readiness());
                 Ok(n)
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -825,7 +826,7 @@ impl Connection {
                     self.average_delay_base = actual_delay;
                 }
 
-                let mut average_delay_sample = 0;
+                let average_delay_sample;
                 let dist_down = self.average_delay_base.wrapping_sub(actual_delay);
                 let dist_up = actual_delay.wrapping_sub(self.average_delay_base);
 
@@ -840,7 +841,7 @@ impl Connection {
 
                 if now > self.average_sample_time {
                     let mut prev_average_delay = self.average_delay;
-                    self.average_delay = (self.current_delay_sum / self.current_delay_samples) as u32;
+                    self.average_delay = (self.current_delay_sum / self.current_delay_samples) as i32;
                     self.average_sample_time = now + Duration::from_secs(5);
 
                     self.current_delay_sum = 0;
@@ -849,18 +850,16 @@ impl Connection {
                     let min_sample = cmp::min(prev_average_delay, self.average_delay);
                     let max_sample = cmp::max(prev_average_delay, self.average_delay);
 
-                    let mut adjust = 0;
-
                     if min_sample > 0 {
-                        adjust = min_sample;
+                        self.average_delay_base += min_sample as u32;
+                        self.average_delay -= min_sample;
+                        prev_average_delay -= min_sample;
                     } else if max_sample < 0 {
-                        adjust = max_sample;
-                    }
+                        let adjust = -max_sample;
 
-                    if adjust != 0 {
-                        self.average_delay_base += adjust;
-                        self.average_delay -= adjust;
-                        prev_average_delay -= adjust;
+                        self.average_delay_base -= adjust as u32;
+                        self.average_delay += adjust;
+                        prev_average_delay += adjust;
                     }
 
                     // Update the clock drive estimate
@@ -899,11 +898,10 @@ impl Connection {
         let target = TARGET_DELAY;
 
         let mut our_delay = cmp::min(self.our_delays.get().unwrap(), min_rtt);
-        let mut penalty = 0;
         let max_window = self.out_queue.max_window() as usize;
 
         if self.clock_drift < -200_000 {
-            penalty = (-self.clock_drift - 200_000) / 7;
+            let penalty = (-self.clock_drift - 200_000) / 7;
 
             if penalty > 0 {
                 our_delay += penalty as u32;
@@ -988,6 +986,8 @@ impl Connection {
         } else if self.state.is_closed() {
             ready = Ready::readable();
         }
+
+        trace!("updating socket readiness; ready={:?}", ready);
 
         self.set_readiness.set_readiness(ready)
     }
