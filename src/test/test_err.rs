@@ -7,7 +7,7 @@ fn remote_reset() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
@@ -53,7 +53,7 @@ fn remote_sends_invalid_packet() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 

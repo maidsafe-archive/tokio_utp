@@ -7,7 +7,6 @@ use packet::{self, Packet};
 use mio::net::UdpSocket;
 use mio::{Evented, Registration, SetReadiness, Ready, Poll, PollOpt, Token};
 
-use rand;
 use bytes::{BytesMut, BufMut};
 use slab::Slab;
 
@@ -61,6 +60,8 @@ struct Inner {
     accept_buf: VecDeque<UtpStream>,
 
     listener: SetReadiness,
+
+    listener_open: bool,
 }
 
 struct Shared {
@@ -183,6 +184,7 @@ impl UtpSocket {
             in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
             accept_buf: VecDeque::new(),
             listener: set_readiness,
+            listener_open: true,
         }));
 
         let listener = UtpListener {
@@ -237,6 +239,24 @@ impl UtpListener {
     /// This function will also advance the state of all associated connections.
     pub fn accept(&self) -> io::Result<UtpStream> {
         self.inner.borrow_mut().accept()
+    }
+}
+
+impl Drop for UtpListener {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.listener_open = false;
+
+        // Empty the connection queue
+        while let Ok(_) = inner.accept() {}
+    }
+}
+
+#[cfg(test)]
+impl UtpListener {
+    pub fn is_readable(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.listener.readiness().is_readable()
     }
 }
 
@@ -566,7 +586,17 @@ impl Inner {
                    addr: SocketAddr,
                    inner: &InnerCell) -> io::Result<()>
     {
-        let seq_nr = rand::random();
+        if !self.listener_open {
+            // Send the RESET packet, ignoring errors...
+            let mut p = Packet::reset();
+            p.set_connection_id(packet.connection_id());
+
+            let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+
+            return Ok(());
+        }
+
+        let seq_nr = util::rand();
         let ack_nr = packet.seq_nr();
         let send_id = packet.connection_id();
         let receive_id = send_id + 1;

@@ -35,7 +35,7 @@ pub fn as_wrapping_micros(duration: Duration) -> u32 {
 /// representable value in u16 and it is incremented to yield the corresponding sender
 /// identifier.
 pub fn generate_sequential_identifiers() -> (u16, u16) {
-    let id = next_u16();
+    let id: u16 = rand();
 
     if id.checked_add(1).is_some() {
         (id, id + 1)
@@ -45,30 +45,27 @@ pub fn generate_sequential_identifiers() -> (u16, u16) {
 }
 
 #[cfg(not(test))]
-fn next_u16() -> u16 {
+pub fn rand<T: ::rand::Rand>() -> T {
     use rand::{self, Rng};
 
     let mut rng = rand::thread_rng();
-    rng.gen::<u16>()
+    rng.gen::<T>()
 }
 
 #[cfg(test)]
-pub use self::test::reset_rand;
-
-#[cfg(test)]
-use self::test::next_u16;
+pub use self::test::{rand, reset_rand};
 
 #[cfg(test)]
 mod test {
-    use rand::{XorShiftRng, Rng};
+    use rand::{Rand, XorShiftRng, Rng};
     use std::cell::RefCell;
 
     thread_local!(static THREAD_RNG: RefCell<XorShiftRng> = {
         RefCell::new(XorShiftRng::new_unseeded())
     });
 
-    pub fn next_u16() -> u16 {
-        THREAD_RNG.with(|t| t.borrow_mut().gen::<u16>())
+    pub fn rand<T: Rand>() -> T {
+        THREAD_RNG.with(|t| t.borrow_mut().gen::<T>())
     }
 
     #[cfg(test)]

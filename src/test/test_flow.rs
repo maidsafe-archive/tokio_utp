@@ -7,7 +7,7 @@ fn ramp_up() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 

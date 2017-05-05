@@ -8,7 +8,7 @@ fn connect_echo_close() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
@@ -119,7 +119,7 @@ fn connect_out_of_order_recv() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
@@ -190,7 +190,7 @@ fn ignores_dup_packets() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
@@ -267,7 +267,7 @@ fn remote_close() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 

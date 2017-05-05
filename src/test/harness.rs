@@ -6,12 +6,11 @@ use std::time::{Duration, Instant};
 
 pub struct Harness {
     socket: UtpSocket,
-    listener: UtpListener,
     poll: Poll,
 }
 
 impl Harness {
-    pub fn new() -> Harness {
+    pub fn new() -> (Harness, UtpListener) {
         let (socket, listener) = UtpSocket::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
         let poll = Poll::new().unwrap();
 
@@ -24,11 +23,12 @@ impl Harness {
                      Ready::readable(),
                      PollOpt::edge()).unwrap();
 
-        Harness {
+        let harness = Harness {
             socket: socket,
-            listener: listener,
             poll: poll,
-        }
+        };
+
+        (harness, listener)
     }
 
     pub fn local_addr(&self) -> SocketAddr {

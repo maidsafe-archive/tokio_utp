@@ -6,6 +6,7 @@ mod harness;
 
 mod test_err;
 mod test_flow;
+mod test_listener;
 mod test_stream;
 mod test_timeout;
 

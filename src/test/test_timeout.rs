@@ -7,7 +7,7 @@ fn resends_syn_packet_on_timeout() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
@@ -75,7 +75,7 @@ fn resends_data_packet_on_timeout() {
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
-    let socket = Harness::new();
+    let (socket, _) = Harness::new();
     let mock = Mock::new();
     let server = mock.local_addr();
 
