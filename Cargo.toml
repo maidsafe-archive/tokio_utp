@@ -2,6 +2,12 @@
 name = "utp2"
 version = "0.1.0"
 authors = ["Carl Lerche <me@carllerche.com>"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/carllerche/utp"
+documentation = "https://docs.rs/utp2/0.1"
+description = """
+Non-blocking, Mio compatible, UTP implementation.
+"""
 
 [dependencies]
 mio = "0.6.9"
