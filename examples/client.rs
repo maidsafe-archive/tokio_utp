@@ -1,9 +1,9 @@
-extern crate utp;
+extern crate utp2;
 extern crate mio;
 extern crate env_logger;
 
 use mio::*;
-use utp::*;
+use utp2::*;
 
 use std::net::SocketAddr;
 
