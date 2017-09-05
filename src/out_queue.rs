@@ -373,6 +373,10 @@ impl OutQueue {
             src = &src[packet_len..];
         }
 
+        if len == 0 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
         Ok(len)
     }
 
@@ -388,7 +392,7 @@ impl OutQueue {
     }
 
     pub fn is_writable(&self) -> bool {
-        self.remaining_capacity() > 0
+        self.remaining_capacity() > HEADER_LEN
     }
 
     fn in_flight(&self) -> usize {
