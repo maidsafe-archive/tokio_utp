@@ -163,14 +163,17 @@ impl OutQueue {
             // If the packet has a payload, track the number of bytes sent
             acked_bytes += p.packet.payload().len();
 
-            if p.last_sent_at.is_none() {
-                // We timed out, but the ack arrived after the timeout... the
-                // packet is ACKed but don't use it for congestion control
-                continue;
-            }
+            let last_sent_at = match p.last_sent_at {
+                Some(last_sent_at) => last_sent_at,
+                None => {
+                    // We timed out, but the ack arrived after the timeout... the
+                    // packet is ACKed but don't use it for congestion control
+                    continue;
+                },
+            };
 
             // Calculate the RTT for the packet.
-            let packet_rtt = now.duration_since(p.last_sent_at.unwrap());
+            let packet_rtt = now.duration_since(last_sent_at);
 
             min_rtt = Some(min_rtt
                 .map(|curr| cmp::min(curr, packet_rtt))
@@ -178,7 +181,7 @@ impl OutQueue {
 
             if p.num_sends == 1 {
                 // Use the packet to update rtt & rtt_variance
-                let packet_rtt = util::as_ms(now.duration_since(p.last_sent_at.unwrap()));
+                let packet_rtt = util::as_ms(now.duration_since(last_sent_at));
                 let delta = (self.rtt as i64 - packet_rtt as i64).abs();
 
                 self.rtt_variance += (delta - self.rtt_variance) / 4;
@@ -281,7 +284,7 @@ impl OutQueue {
                 }
             } else {
                 // Don't send more data than the window allows
-                if in_flight + entry.packet.len() > self.peer_window as usize {
+                if entry.packet.len() > self.peer_window as usize {
                     return None;
                 }
             }
