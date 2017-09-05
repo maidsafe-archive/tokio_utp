@@ -999,7 +999,7 @@ impl Connection {
             }
         }
 
-        let off_target = (target - our_delay) as f64;
+        let off_target = ((target as i64) - (our_delay as i64)) as f64;
         let window_factor =
             cmp::min(bytes_acked, max_window) as f64 /
             cmp::max(max_window, bytes_acked) as f64;
@@ -1016,10 +1016,11 @@ impl Connection {
             scaled_gain = 0.0;
         }
 
-        let ledbat_cwnd = if max_window + (scaled_gain as usize) < MIN_WINDOW_SIZE {
+        let new_window = max_window as i64 + scaled_gain as i64;
+        let ledbat_cwnd = if new_window < MIN_WINDOW_SIZE as i64 {
             MIN_WINDOW_SIZE
         } else {
-            max_window + scaled_gain as usize
+            new_window as usize
         };
 
         if self.slow_start {
