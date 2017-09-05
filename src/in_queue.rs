@@ -121,7 +121,7 @@ impl InQueue {
     pub fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         let n = match self.data.front_mut() {
             Some(buf) => {
-                let n = try!(buf.read(dst));
+                let n = buf.read(dst)?;
 
                 if buf.has_remaining() {
                     return Ok(n);

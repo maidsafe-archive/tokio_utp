@@ -296,7 +296,7 @@ impl UtpStream {
         match connection.in_queue.read(dst) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if connection.state == State::Connected && connection.read_open {
-                    try!(connection.update_readiness());
+                    connection.update_readiness()?;
                     Err(io::ErrorKind::WouldBlock.into())
                 } else if connection.state == State::Reset {
                     Err(io::ErrorKind::ConnectionReset.into())
@@ -379,13 +379,13 @@ impl Inner {
                     unreachable!();
                 }
 
-                try!(conn.update_readiness());
+                conn.update_readiness()?;
 
                 Ok(socket)
             }
             None => {
                 // Unset readiness
-                try!(self.listener.set_readiness(Ready::empty()));
+                self.listener.set_readiness(Ready::empty())?;
 
                 Err(io::ErrorKind::WouldBlock.into())
             }
@@ -402,12 +402,12 @@ impl Inner {
         match conn.out_queue.write(src) {
             Ok(n) => {
                 conn.flush(&mut self.shared)?;
-                try!(conn.update_readiness());
+                conn.update_readiness()?;
                 Ok(n)
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 conn.last_maxed_out_window = Instant::now();
-                try!(conn.update_readiness());
+                conn.update_readiness()?;
                 Err(io::ErrorKind::WouldBlock.into())
             }
             Err(e) => {
@@ -548,7 +548,7 @@ impl Inner {
     fn tick(&mut self) -> io::Result<()> {
         trace!("Socket::tick");
         for &idx in self.connection_lookup.values() {
-            try!(self.connections[idx].tick(&mut self.shared));
+            self.connections[idx].tick(&mut self.shared)?;
         }
 
         Ok(())
@@ -574,7 +574,7 @@ impl Inner {
                     Some(&token) => {
                         let finalized = {
                             let conn = &mut self.connections[token];
-                            try!(conn.process(packet, &mut self.shared))
+                            conn.process(packet, &mut self.shared)?
                         };
 
                         if finalized {
@@ -670,7 +670,7 @@ impl Inner {
         });
 
         // Notify the listener
-        try!(self.listener.set_readiness(Ready::readable()));
+        self.listener.set_readiness(Ready::readable())?;
 
         return Ok(());
     }
@@ -681,13 +681,13 @@ impl Inner {
 
         // Read in the bytes
         let addr = unsafe {
-            let (n, addr) = try!(self.shared.socket.recv_from(self.in_buf.bytes_mut()));
+            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
             self.in_buf.advance_mut(n);
             addr
         };
 
         // Try loading the header
-        let packet = try!(Packet::parse(self.in_buf.take()));
+        let packet = Packet::parse(self.in_buf.take())?;
 
         Ok((packet, addr))
     }
@@ -754,7 +754,7 @@ impl Connection {
             self.state = State::Reset;
 
             // Update readiness
-            try!(self.update_readiness());
+            self.update_readiness()?;
 
             return Ok(self.is_finalized());
         }
@@ -826,7 +826,7 @@ impl Connection {
         self.flush(shared)?;
 
         // Update readiness
-        try!(self.update_readiness());
+        self.update_readiness()?;
 
         Ok(self.is_finalized())
     }
