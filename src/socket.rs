@@ -411,11 +411,10 @@ impl Inner {
 
     /// Connect a new `UtpSocket` to the given remote socket address
     fn connect(&mut self, addr: &SocketAddr, inner: &InnerCell) -> io::Result<UtpStream> {
-        if self.connections.len() == MAX_CONNECTIONS_PER_SOCKET {
+        if self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
+            debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
             return Err(io::Error::new(io::ErrorKind::Other, "socket has max connections"));
         }
-
-        debug_assert!(self.connections.len() < MAX_CONNECTIONS_PER_SOCKET);
 
         // The peer establishing the connection picks the identifiers uses for
         // the stream.
@@ -586,7 +585,8 @@ impl Inner {
                    addr: SocketAddr,
                    inner: &InnerCell) -> io::Result<()>
     {
-        if !self.listener_open {
+        if !self.listener_open || self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
+            debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
             // Send the RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(packet.connection_id());
@@ -600,8 +600,6 @@ impl Inner {
         let ack_nr = packet.seq_nr();
         let send_id = packet.connection_id();
         let receive_id = send_id + 1;
-
-        // TODO: If accept buffer is full, reset the connection
 
         let key = Key {
             receive_id: receive_id,
