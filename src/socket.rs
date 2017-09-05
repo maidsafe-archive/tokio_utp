@@ -315,12 +315,12 @@ impl UtpStream {
         self.inner.borrow_mut().write(self.token, src)
     }
 
-    pub fn shutdown_write(&self) {
+    pub fn shutdown_write(&self) -> io::Result<()> {
         self.inner.borrow_mut().shutdown_write(self.token)
     }
 
     // Returns true if all outgoing data was written.
-    pub fn flush(&self) -> bool {
+    pub fn flush(&self) -> io::Result<bool> {
         self.inner.borrow_mut().flush(self.token)
     }
 }
@@ -401,7 +401,7 @@ impl Inner {
 
         match conn.out_queue.write(src) {
             Ok(n) => {
-                conn.flush(&mut self.shared);
+                conn.flush(&mut self.shared)?;
                 try!(conn.update_readiness());
                 Ok(n)
             }
@@ -452,7 +452,7 @@ impl Inner {
         let (registration, set_readiness) = Registration::new2();
         let now = Instant::now();
 
-        let token = self.connections.insert(Connection {
+        let mut connection = Connection {
             state: State::SynSent,
             key: key.clone(),
             set_readiness: set_readiness,
@@ -472,12 +472,14 @@ impl Inner {
             average_sample_time: now,
             clock_drift: 0,
             slow_start: true,
-        });
+        };
+
+        connection.flush(&mut self.shared)?;
+
+        let token = self.connections.insert(connection);
 
         // Track the connection in the lookup
         self.connection_lookup.insert(key, token);
-
-        self.flush_all();
 
         Ok(UtpStream {
             inner: inner.clone(),
@@ -486,11 +488,11 @@ impl Inner {
         })
     }
 
-    fn shutdown_write(&mut self, token: usize) {
+    fn shutdown_write(&mut self, token: usize) -> io::Result<()> {
         let conn = &mut self.connections[token];
-        conn.send_fin(false, &mut self.shared);
-        conn.flush(&mut self.shared);
         conn.write_open = false;
+        conn.send_fin(false, &mut self.shared);
+        conn.flush(&mut self.shared)
     }
 
     fn close(&mut self, token: usize) {
@@ -499,7 +501,7 @@ impl Inner {
             conn.released = true;
             conn.send_fin(false, &mut self.shared);
             conn.state = State::FinSent;
-            conn.flush(&mut self.shared);
+            let _ = conn.flush(&mut self.shared);
             conn.is_finalized()
         };
 
@@ -539,7 +541,7 @@ impl Inner {
             }
         }
 
-        self.flush_all();
+        self.flush_all()?;
         Ok(())
     }
 
@@ -655,7 +657,7 @@ impl Inner {
         };
 
         // This will handle the state packet being sent
-        connection.flush(&mut self.shared);
+        connection.flush(&mut self.shared)?;
 
         let token = self.connections.insert(connection);
         self.connection_lookup.insert(key, token);
@@ -690,26 +692,27 @@ impl Inner {
         Ok((packet, addr))
     }
 
-    fn flush_all(&mut self) {
+    fn flush_all(&mut self) -> io::Result<()> {
         // TODO: Make this smarter!
 
         for &token in self.connection_lookup.values() {
             if !self.shared.is_writable() {
-                return;
+                return Ok(());
             }
 
             let conn = &mut self.connections[token];
-            conn.flush(&mut self.shared);
+            conn.flush(&mut self.shared)?;
         }
+        Ok(())
     }
 
-    fn flush(&mut self, token: usize) -> bool {
+    fn flush(&mut self, token: usize) -> io::Result<bool> {
         let connection = &mut self.connections[token];
         if !self.shared.is_writable() {
-            return false;
+            return Ok(false);
         }
-        connection.flush(&mut self.shared);
-        connection.out_queue.is_empty()
+        connection.flush(&mut self.shared)?;
+        Ok(connection.out_queue.is_empty())
     }
 
     fn remove_connection(&mut self, token: usize) {
@@ -820,7 +823,7 @@ impl Connection {
         self.reset_timeout();
 
         // Flush out queue
-        self.flush(shared);
+        self.flush(shared)?;
 
         // Update readiness
         try!(self.update_readiness());
@@ -828,16 +831,16 @@ impl Connection {
         Ok(self.is_finalized())
     }
 
-    fn flush(&mut self, shared: &mut Shared) {
+    fn flush(&mut self, shared: &mut Shared) -> io::Result<()> {
         let mut sent = false;
 
         if self.state == State::Reset {
-            return;
+            return Ok(());
         }
 
         while let Some(next) = self.out_queue.next() {
             if !shared.is_writable() {
-                return;
+                return Ok(());
             }
 
             trace!("send_to; addr={:?}; packet={:?}", self.key.addr, next.packet());
@@ -852,10 +855,10 @@ impl Connection {
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     shared.need_writable();
-                    return;
+                    return Ok(());
                 }
                 Err(e) => {
-                    panic!("TODO: implement error handling {:?}", e);
+                    return Err(e);
                 }
             }
         }
@@ -863,6 +866,8 @@ impl Connection {
         if sent {
             self.reset_timeout();
         }
+
+        Ok(())
     }
 
     fn tick(&mut self, shared: &mut Shared) -> io::Result<()> {
@@ -874,7 +879,7 @@ impl Connection {
             if Instant::now() >= deadline {
                 trace!("connection timed out; id={}", self.out_queue.connection_id());
                 self.out_queue.timed_out();
-                self.flush(shared);
+                self.flush(shared)?;
             }
         }
 
