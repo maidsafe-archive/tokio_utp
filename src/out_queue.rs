@@ -100,7 +100,7 @@ impl OutQueue {
                 seq_nr: seq_nr,
                 local_ack: local_ack,
                 last_ack: None,
-                local_window: 0,
+                local_window: MAX_WINDOW_SIZE as u32,
                 created_at: Instant::now(),
                 their_delay: 0,
             },
