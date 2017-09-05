@@ -693,9 +693,16 @@ impl Inner {
     }
 
     fn flush_all(&mut self) -> io::Result<()> {
-        // TODO: Make this smarter!
+        if self.connection_lookup.len() == 0 {
+            return Ok(());
+        }
 
-        for &token in self.connection_lookup.values() {
+        // Iterate in semi-random order so that bandwidth is divided fairly between connections.
+        let skip_point = util::rand::<usize>() % self.connection_lookup.len();
+        let tokens = self
+            .connection_lookup.values().skip(skip_point)
+            .chain(self.connection_lookup.values().take(skip_point));
+        for &token in tokens {
             if !self.shared.is_writable() {
                 return Ok(());
             }
