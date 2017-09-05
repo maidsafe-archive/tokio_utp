@@ -91,6 +91,11 @@ struct Connection {
     // True when the `UtpStream` handle has been dropped
     released: bool,
 
+    // False when `shutdown_write` has been called.
+    write_open: bool,
+    // False when we've recieved a FIN.
+    read_open: bool,
+
     // Used to signal readiness on the `UtpStream`
     set_readiness: SetReadiness,
 
@@ -290,17 +295,13 @@ impl UtpStream {
 
         match connection.in_queue.read(dst) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if connection.state == State::Connected {
+                if connection.state == State::Connected && connection.read_open {
                     try!(connection.update_readiness());
                     Err(io::ErrorKind::WouldBlock.into())
-                } else if connection.state.is_closed() {
-                    if connection.state == State::Reset {
-                        Err(io::ErrorKind::ConnectionReset.into())
-                    } else {
-                        Ok(0)
-                    }
+                } else if connection.state == State::Reset {
+                    Err(io::ErrorKind::ConnectionReset.into())
                 } else {
-                    unreachable!();
+                    Ok(0)
                 }
             }
             ret => {
@@ -312,6 +313,15 @@ impl UtpStream {
 
     pub fn write(&self, src: &[u8]) -> io::Result<usize> {
         self.inner.borrow_mut().write(self.token, src)
+    }
+
+    pub fn shutdown_write(&self) {
+        self.inner.borrow_mut().shutdown_write(self.token)
+    }
+
+    // Returns true if all outgoing data was written.
+    pub fn flush(&self) -> bool {
+        self.inner.borrow_mut().flush(self.token)
     }
 }
 
@@ -385,10 +395,7 @@ impl Inner {
     fn write(&mut self, token: usize, src: &[u8]) -> io::Result<usize> {
         let conn = &mut self.connections[token];
 
-        if conn.state != State::Connected {
-            assert!(conn.state.is_closed(),
-                    "expected closed state; actual={:?}", conn.state);
-
+        if conn.state.is_closed() || !conn.write_open {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
 
@@ -454,6 +461,8 @@ impl Inner {
             our_delays: Delays::new(),
             their_delays: Delays::new(),
             released: false,
+            write_open: true,
+            read_open: true,
             deadline: Some(now + Duration::from_millis(DEFAULT_TIMEOUT_MS)),
             last_maxed_out_window: now,
             average_delay: 0,
@@ -468,7 +477,7 @@ impl Inner {
         // Track the connection in the lookup
         self.connection_lookup.insert(key, token);
 
-        self.flush();
+        self.flush_all();
 
         Ok(UtpStream {
             inner: inner.clone(),
@@ -477,11 +486,19 @@ impl Inner {
         })
     }
 
+    fn shutdown_write(&mut self, token: usize) {
+        let conn = &mut self.connections[token];
+        conn.send_fin(false, &mut self.shared);
+        conn.flush(&mut self.shared);
+        conn.write_open = false;
+    }
+
     fn close(&mut self, token: usize) {
         let finalized = {
             let conn = &mut self.connections[token];
             conn.released = true;
             conn.send_fin(false, &mut self.shared);
+            conn.state = State::FinSent;
             conn.flush(&mut self.shared);
             conn.is_finalized()
         };
@@ -522,7 +539,7 @@ impl Inner {
             }
         }
 
-        self.flush();
+        self.flush_all();
         Ok(())
     }
 
@@ -622,6 +639,8 @@ impl Inner {
             out_queue: OutQueue::new(send_id, seq_nr, Some(ack_nr)),
             in_queue: InQueue::new(Some(ack_nr)),
             released: false,
+            write_open: true,
+            read_open: true,
             our_delays: Delays::new(),
             their_delays: Delays::new(),
             deadline: None,
@@ -671,7 +690,7 @@ impl Inner {
         Ok((packet, addr))
     }
 
-    fn flush(&mut self) {
+    fn flush_all(&mut self) {
         // TODO: Make this smarter!
 
         for &token in self.connection_lookup.values() {
@@ -682,6 +701,15 @@ impl Inner {
             let conn = &mut self.connections[token];
             conn.flush(&mut self.shared);
         }
+    }
+
+    fn flush(&mut self, token: usize) -> bool {
+        let connection = &mut self.connections[token];
+        if !self.shared.is_writable() {
+            return false;
+        }
+        connection.flush(&mut self.shared);
+        connection.out_queue.is_empty()
     }
 
     fn remove_connection(&mut self, token: usize) {
@@ -773,7 +801,7 @@ impl Connection {
                     self.state = State::Reset;
                 }
                 packet::Type::Fin => {
-                    self.send_fin(true, shared);
+                    self.read_open = false;
                 }
                 packet::Type::Data |
                     packet::Type::Syn |
@@ -1020,12 +1048,11 @@ impl Connection {
     }
 
     fn send_fin(&mut self, _: bool, shared: &mut Shared) {
-        if self.state.is_closed() {
+        if self.state.is_closed() | !self.write_open {
             return;
         }
 
         self.out_queue.push(Packet::fin());
-        self.state = State::FinSent;
     }
 
     fn is_finalized(&self) -> bool {
@@ -1058,11 +1085,11 @@ impl Connection {
     // =========
 
     fn is_readable(&self) -> bool {
-        self.in_queue.is_readable()
+        !self.read_open || self.in_queue.is_readable()
     }
 
     fn is_writable(&self) -> bool {
-        self.out_queue.is_writable()
+        self.write_open && self.out_queue.is_writable()
     }
 }
 

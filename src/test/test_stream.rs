@@ -294,6 +294,12 @@ fn remote_close() {
         p.set_ack_nr(1);
         m.send_to(p, &addr);
 
+        // Receive the State packet
+        let p = m.recv_from(&addr);
+        assert_eq!(p.ty(), packet::Type::State);
+        assert_eq!(p.seq_nr(), 1);
+        assert_eq!(p.ack_nr(), 124);
+
         // Receive the FIN packet
         let p = m.recv_from(&addr);
         assert_eq!(p.ty(), packet::Type::Fin);
@@ -311,7 +317,7 @@ fn remote_close() {
     let stream = socket.connect(server);
 
     // The socket becomes writable
-    socket.wait_until(|| stream.is_readable());
+    socket.wait_until(|| stream.is_writable());
 
     // Wait a bit more...
     socket.tick_for(200);
