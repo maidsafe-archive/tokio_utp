@@ -61,9 +61,13 @@ fn round_trip_inner() {
         poll.poll(&mut events, Some(duration)).unwrap();
         for event in &events {
             match event.token() {
-                Token(0) => socket_a.ready(event.readiness()).unwrap(),
+                Token(0) => {
+                    let _ = socket_a.ready(event.readiness()).unwrap();
+                },
                 Token(1) => (),
-                Token(2) => socket_b.ready(event.readiness()).unwrap(),
+                Token(2) => {
+                    let _ = socket_b.ready(event.readiness()).unwrap();
+                },
                 Token(3) => {
                     match listener_b.accept() {
                         Ok(stream) => {

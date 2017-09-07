@@ -210,7 +210,8 @@ impl UtpSocket {
     }
 
     /// Called whenever the socket readiness changes
-    pub fn ready(&self, ready: Ready) -> io::Result<()> {
+    /// Returns true if all connections have been finalised.
+    pub fn ready(&self, ready: Ready) -> io::Result<bool> {
         self.inner.borrow_mut().ready(ready, &self.inner)
     }
 
@@ -496,7 +497,8 @@ impl Inner {
         let conn = &mut self.connections[token];
         conn.write_open = false;
         conn.send_fin(false, &mut self.shared);
-        conn.flush(&mut self.shared)
+        let _ = conn.flush(&mut self.shared);
+        Ok(())
     }
 
     fn close(&mut self, token: usize) {
@@ -514,7 +516,7 @@ impl Inner {
         }
     }
 
-    fn ready(&mut self, ready: Ready, inner: &InnerCell) -> io::Result<()> {
+    fn ready(&mut self, ready: Ready, inner: &InnerCell) -> io::Result<bool> {
         trace!("ready; ready={:?}", ready);
 
         // Update readiness
@@ -545,8 +547,8 @@ impl Inner {
             }
         }
 
-        self.flush_all()?;
-        Ok(())
+        let _ = self.flush_all()?;
+        Ok(self.connection_lookup.is_empty())
     }
 
     fn tick(&mut self) -> io::Result<()> {
@@ -696,9 +698,9 @@ impl Inner {
         Ok((packet, addr))
     }
 
-    fn flush_all(&mut self) -> io::Result<()> {
+    fn flush_all(&mut self) -> io::Result<bool> {
         if self.connection_lookup.len() == 0 {
-            return Ok(());
+            return Ok(true);
         }
 
         // Iterate in semi-random order so that bandwidth is divided fairly between connections.
@@ -707,23 +709,17 @@ impl Inner {
             .connection_lookup.values().skip(skip_point)
             .chain(self.connection_lookup.values().take(skip_point));
         for &token in tokens {
-            if !self.shared.is_writable() {
-                return Ok(());
-            }
-
             let conn = &mut self.connections[token];
-            conn.flush(&mut self.shared)?;
+            if !conn.flush(&mut self.shared)? {
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn flush(&mut self, token: usize) -> io::Result<bool> {
         let connection = &mut self.connections[token];
-        if !self.shared.is_writable() {
-            return Ok(false);
-        }
-        connection.flush(&mut self.shared)?;
-        Ok(connection.out_queue.is_empty())
+        connection.flush(&mut self.shared)
     }
 
     fn remove_connection(&mut self, token: usize) {
@@ -842,16 +838,16 @@ impl Connection {
         Ok(self.is_finalized())
     }
 
-    fn flush(&mut self, shared: &mut Shared) -> io::Result<()> {
+    fn flush(&mut self, shared: &mut Shared) -> io::Result<bool> {
         let mut sent = false;
 
         if self.state == State::Reset {
-            return Ok(());
+            return Ok(true);
         }
 
         while let Some(next) = self.out_queue.next() {
             if !shared.is_writable() {
-                return Ok(());
+                return Ok(false);
             }
 
             trace!("send_to; addr={:?}; packet={:?}", self.key.addr, next.packet());
@@ -866,7 +862,7 @@ impl Connection {
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     shared.need_writable();
-                    return Ok(());
+                    return Ok(false);
                 }
                 Err(e) => {
                     return Err(e);
@@ -878,7 +874,7 @@ impl Connection {
             self.reset_timeout();
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn tick(&mut self, shared: &mut Shared) -> io::Result<()> {
