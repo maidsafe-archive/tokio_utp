@@ -142,14 +142,7 @@ impl OutQueue {
             let pop = self.packets.front()
                 .map(|entry| {
                     let seq_nr = entry.packet.seq_nr();
-
-                    let lower = ack_nr.wrapping_sub(ack_nr);
-
-                    if lower < ack_nr {
-                        seq_nr > lower && seq_nr <= ack_nr
-                    } else {
-                        seq_nr > lower || seq_nr <= ack_nr
-                    }
+                    ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr)
                 })
                 .unwrap_or(false);
 
