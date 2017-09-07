@@ -9,6 +9,7 @@ mod test_flow;
 mod test_listener;
 mod test_stream;
 mod test_timeout;
+mod test_round_trip;
 
 /// Types that are imported in test modules
 mod prelude {
