@@ -239,6 +239,10 @@ impl Evented for UtpSocket {
 }
 
 impl UtpListener {
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.borrow().shared.socket.local_addr()
+    }
+
     /// Receive a new inbound connection.
     ///
     /// This function will also advance the state of all associated connections.
