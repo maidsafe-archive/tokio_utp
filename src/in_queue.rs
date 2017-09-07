@@ -45,12 +45,14 @@ impl InQueue {
         trace!("poll; ack_nr={:?}", self.ack_nr);
 
         // Get the current position, if none then no packets can be read
-        let pos = match self.ack_nr {
-            Some(ack_nr) => (ack_nr as usize) + 1,
+        let mut pos = match self.ack_nr {
+            Some(ack_nr) => ack_nr as usize,
             None => return None,
         };
 
         loop {
+            pos += 1;
+
             // Take the next packet
             let slot = pos % MAX_DELTA_SEQ;
             let p = mem::replace(&mut self.packets[slot], None);
