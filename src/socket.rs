@@ -495,8 +495,8 @@ impl Inner {
 
     fn shutdown_write(&mut self, token: usize) -> io::Result<()> {
         let conn = &mut self.connections[token];
-        conn.write_open = false;
         conn.send_fin(false, &mut self.shared);
+        conn.write_open = false;
         let _ = conn.flush(&mut self.shared);
         Ok(())
     }
