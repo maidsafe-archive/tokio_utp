@@ -3,6 +3,9 @@ use std::io;
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use std::thread;
+use std::fs::File;
+use std::io::Write;
+use std::cmp;
 use ::util;
 use ::UtpSocket;
 
@@ -10,17 +13,37 @@ enum Explode {}
 
 #[test]
 fn round_trip() {
-    let (tx, rx) = mpsc::channel();
-    let joiner = thread::spawn(move || {
-        round_trip_inner();
-        tx.send(()).unwrap();
-    });
-    rx.recv_timeout(Duration::from_secs(60)).unwrap();
+    let _ = ::env_logger::init();
+    ::util::reset_rand();
+
+    let mut amounts = Vec::new();
+    for i in 0..20 {
+        let rough_amount = 1 << i;
+        for j in 0..cmp::min(cmp::max(1, rough_amount >> 4), 100) {
+            let num_bytes = rough_amount + (util::rand::<usize>() % rough_amount);
+            amounts.push(num_bytes);
+        }
+    }
+
+    let num_tests = amounts.len();
+    for (i, num_bytes) in amounts.into_iter().enumerate() {
+        info!("test {} of {}, sending {} bytes", i + 1, num_tests, num_bytes);
+        single_round_trip(num_bytes);
+    }
 }
 
-fn round_trip_inner() {
-    const NUM_BYTES: usize = 1024 * 1024;
+fn single_round_trip(num_bytes: usize) {
+    let (tx, rx) = mpsc::channel();
+    let _joiner = thread::spawn(move || {
+        single_round_trip_inner(num_bytes);
+        tx.send(()).unwrap();
+    });
+    let nanos = 1_000_000 + 10_000 * num_bytes as u64;
+    rx.recv_timeout(Duration::new(nanos / 1000_000_000, (nanos % 1000_000_000) as u32)).unwrap();
+}
 
+fn single_round_trip_inner(num_bytes: usize) {
+    let before = Instant::now();
     let poll = Poll::new().unwrap();
     let rw = Ready::readable() | Ready::writable();
     let (socket_a, listener_a) = UtpSocket::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
@@ -35,9 +58,9 @@ fn round_trip_inner() {
     poll.register(&stream_a, Token(4), rw, PollOpt::edge()).unwrap();
     let mut stream_b = None;
 
-    let send_buf: Vec<u8> = (0..NUM_BYTES).into_iter().map(|_| util::rand()).collect();
-    let mut recv_buf: Vec<u8> = (0..NUM_BYTES).into_iter().map(|_| 0).collect();
-    let mut middle_buf: Vec<u8> = (0..NUM_BYTES).into_iter().map(|_| 1).collect();
+    let send_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| util::rand()).collect();
+    let mut recv_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| 0).collect();
+    let mut middle_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| 1).collect();
     let mut bytes_sent_a = 0;
     let mut bytes_recv_a = 0;
     let mut bytes_sent_b = 0;
@@ -84,8 +107,8 @@ fn round_trip_inner() {
                         match stream_a.read(&mut recv_buf[bytes_recv_a..]) {
                             Ok(n) => {
                                 bytes_recv_a += n;
-                                println!("copied {}/{} bytes", bytes_recv_a, NUM_BYTES);
-                                if bytes_recv_a == NUM_BYTES {
+                                //println!("copied {}/{} bytes", bytes_recv_a, num_bytes);
+                                if bytes_recv_a == num_bytes {
                                     break 'big_loop;
                                 }
                             },
@@ -121,10 +144,16 @@ fn round_trip_inner() {
         }
     }
 
-    assert_eq!(bytes_sent_a, NUM_BYTES);
-    assert_eq!(bytes_recv_a, NUM_BYTES);
-    assert_eq!(bytes_sent_b, NUM_BYTES);
-    assert_eq!(bytes_recv_b, NUM_BYTES);
-    assert_eq!(send_buf, recv_buf);
+    if send_buf != recv_buf {
+        let mut send = File::create("mio-utp-round-trip-failed-send.dat").unwrap();
+        let mut recv = File::create("mio-utp-round-trip-failed-recv.dat").unwrap();
+        let mut middle = File::create("mio-utp-round-trip-failed-middle.dat").unwrap();
+        send.write_all(&send_buf).unwrap();
+        recv.write_all(&recv_buf).unwrap();
+        middle.write_all(&middle_buf).unwrap();
+        panic!("Data corrupted during round-trip! \
+               Sent/intermediate/received data saved to mio-utp-round-trip-failed-send.dat, \
+               mio-utp-round-trip-middle.dat and mio-utp-round-trip-failed-recv.dat");
+    }
 }
 
