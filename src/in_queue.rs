@@ -69,7 +69,7 @@ impl InQueue {
             };
 
             // Update ack_nr
-            self.ack_nr = Some((pos % u16::MAX as usize) as u16);
+            self.ack_nr = Some((pos % (u16::MAX as usize + 1)) as u16);
 
             if p.ty() == packet::Type::Data {
                 trace!(" -> got data");
