@@ -109,6 +109,9 @@ struct Connection {
 
     // Activity deadline
     deadline: Option<Instant>,
+    // Activitity disconnect deadline
+    last_recv_time: Instant,
+    disconnect_timeout_secs: u32,
 
     // Tracks delays for the congestion control algorithm
     our_delays: Delays,
@@ -157,6 +160,7 @@ const DEFAULT_OUT_BUFFER_SIZE: usize = 4 * 1024;
 const MAX_CONNECTIONS_PER_SOCKET: usize = 2 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 const TARGET_DELAY: u32 = 100_000; // 100ms in micros
+const DEFAULT_DISCONNECT_TIMEOUT_SECS: u32 = 60;
 
 const SLOW_START_THRESHOLD: usize = DEFAULT_IN_BUFFER_SIZE;
 const MAX_CWND_INCREASE_BYTES_PER_RTT: usize = 3000;
@@ -328,6 +332,12 @@ impl UtpStream {
     pub fn flush(&self) -> io::Result<bool> {
         self.inner.borrow_mut().flush(self.token)
     }
+
+    pub fn set_disconnect_timeout(&self, duration: Duration) {
+        let mut inner = self.inner.borrow_mut();
+        let mut connection = &mut inner.connections[self.token];
+        connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +479,8 @@ impl Inner {
             write_open: true,
             read_open: true,
             deadline: Some(now + Duration::from_millis(DEFAULT_TIMEOUT_MS)),
+            last_recv_time: now,
+            disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
             last_maxed_out_window: now,
             average_delay: 0,
             current_delay_sum: 0,
@@ -652,6 +664,8 @@ impl Inner {
             our_delays: Delays::new(),
             their_delays: Delays::new(),
             deadline: None,
+            last_recv_time: now,
+            disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
             last_maxed_out_window: now,
             average_delay: 0,
             current_delay_sum: 0,
@@ -825,6 +839,7 @@ impl Connection {
 
         self.update_local_window();
         self.out_queue.set_local_ack(self.in_queue.ack_nr());
+        self.last_recv_time = Instant::now();
 
         // Reset the timeout
         self.reset_timeout();
@@ -882,8 +897,20 @@ impl Connection {
             return Ok(());
         }
 
+        let now = Instant::now();
+        if now > self.last_recv_time + Duration::new(self.disconnect_timeout_secs as u64, 0) {
+            // Send the RESET packet, ignoring errors...
+            let mut p = Packet::reset();
+            p.set_connection_id(self.out_queue.connection_id());
+
+            let _ = shared.socket.send_to(p.as_slice(), &self.key.addr);
+            self.state = State::Reset;
+            self.update_readiness();
+            return Ok(());
+        }
+
         if let Some(deadline) = self.deadline {
-            if Instant::now() >= deadline {
+            if now >= deadline {
                 trace!("connection timed out; id={}", self.out_queue.connection_id());
                 self.out_queue.timed_out();
                 self.flush(shared)?;
