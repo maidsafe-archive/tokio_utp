@@ -126,6 +126,11 @@ struct Connection {
     average_sample_time: Instant,
     clock_drift: i32,
     slow_start: bool,
+
+    // Artifical packet loss rate (for testing)
+    // Probability of dropping is loss_rate / u32::MAX
+    #[cfg(test)]
+    loss_rate: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -353,6 +358,12 @@ impl UtpStream {
         let connection = &inner.connections[self.token];
         connection.set_readiness.readiness().is_writable()
     }
+
+    pub fn set_loss_rate(&self, rate: f32) {
+        let mut inner = self.inner.borrow_mut();
+        let connection = &mut inner.connections[self.token];
+        connection.loss_rate = (rate as f64 * ::std::u32::MAX as f64) as u32;
+    }
 }
 
 impl Drop for UtpStream {
@@ -489,6 +500,8 @@ impl Inner {
             average_sample_time: now,
             clock_drift: 0,
             slow_start: true,
+            #[cfg(test)]
+            loss_rate: 0,
         };
 
         connection.flush(&mut self.shared)?;
@@ -674,6 +687,8 @@ impl Inner {
             average_sample_time: now,
             clock_drift: 0,
             slow_start: true,
+            #[cfg(test)]
+            loss_rate: 0,
         };
 
         // This will handle the state packet being sent
@@ -867,20 +882,31 @@ impl Connection {
 
             trace!("send_to; addr={:?}; packet={:?}", self.key.addr, next.packet());
 
-            match shared.socket.send_to(next.packet().as_slice(), &self.key.addr) {
-                Ok(n) => {
-                    assert_eq!(n, next.packet().as_slice().len());
-                    next.sent();
+            // We randomly drop packets when testing.
+            #[cfg(test)]
+            let drop_packet = self.loss_rate >= util::rand();
+            #[cfg(not(test))]
+            let drop_packet = false;
 
-                    // Reset the connection timeout
-                    sent = true;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    shared.need_writable();
-                    return Ok(false);
-                }
-                Err(e) => {
-                    return Err(e);
+            if drop_packet {
+                next.sent();
+                sent = true;
+            } else {
+                match shared.socket.send_to(next.packet().as_slice(), &self.key.addr) {
+                    Ok(n) => {
+                        assert_eq!(n, next.packet().as_slice().len());
+                        next.sent();
+
+                        // Reset the connection timeout
+                        sent = true;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        shared.need_writable();
+                        return Ok(false);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
                 }
             }
         }
