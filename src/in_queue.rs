@@ -183,9 +183,9 @@ fn in_range(ack_nr: u16, seq_nr: u16) -> bool {
 
     if upper > ack_nr {
         // Non wrapping case
-        seq_nr >= ack_nr && seq_nr < upper
+        seq_nr > ack_nr && seq_nr <= upper
     } else {
         // Wrapping case
-        seq_nr >= ack_nr || seq_nr < upper
+        seq_nr > ack_nr || seq_nr <= upper
     }
 }
