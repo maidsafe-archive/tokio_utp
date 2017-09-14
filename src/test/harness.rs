@@ -66,7 +66,11 @@ impl Harness {
     pub fn wait_ms<F, T>(&self, ms: u64, mut f: F) -> io::Result<T>
         where F: FnMut() -> io::Result<T>,
     {
+        let deadline = Instant::now() + Duration::from_millis(ms);
         loop {
+            if Instant::now() > deadline {
+                panic!("Timed out");
+            }
             self.tick();
 
             match f() {

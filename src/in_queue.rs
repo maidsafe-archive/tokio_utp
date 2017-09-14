@@ -166,7 +166,7 @@ impl InQueue {
         self.ack_nr = Some(ack_nr);
 
         // Now, we prune the queue
-        for (slot, p) in self.packets.iter_mut().enumerate() {
+        for p in self.packets.iter_mut() {
             let keep = p.as_ref()
                 .map(|p| in_range(ack_nr, p.seq_nr()))
                 .unwrap_or(false);

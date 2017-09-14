@@ -84,7 +84,7 @@ fn remote_sends_invalid_packet() {
         assert_eq!(p.connection_id(), 12345);
     });
 
-    let stream = socket.connect(server);
+    let _stream = socket.connect(server);
 
     // The socket becomes writable
     socket.tick_for(100);

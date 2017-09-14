@@ -71,12 +71,6 @@ struct Shared {
     // The current readiness of the socket, this is used when figuring out the
     // readiness of each connection.
     ready: Ready,
-
-    // Buffer used for out-bound data, this does not need to be share-able
-    out_buf: Vec<u8>,
-
-    // where to write the out_buf to
-    out_buf_dst: Option<SocketAddr>,
 }
 
 // Owned by UtpSocket
@@ -159,9 +153,7 @@ enum State {
 type InnerCell = Rc<RefCell<Inner>>;
 
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
-const MAX_BUFFER_SIZE: usize = 64 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
-const DEFAULT_OUT_BUFFER_SIZE: usize = 4 * 1024;
 const MAX_CONNECTIONS_PER_SOCKET: usize = 2 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 const TARGET_DELAY: u32 = 100_000; // 100ms in micros
@@ -190,8 +182,6 @@ impl UtpSocket {
             shared: Shared {
                 socket: socket,
                 ready: Ready::empty(),
-                out_buf: Vec::with_capacity(DEFAULT_OUT_BUFFER_SIZE),
-                out_buf_dst: None,
             },
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
@@ -520,9 +510,11 @@ impl Inner {
 
     fn shutdown_write(&mut self, token: usize) -> io::Result<()> {
         let conn = &mut self.connections[token];
-        conn.send_fin(false, &mut self.shared);
         conn.write_open = false;
-        let _ = conn.flush(&mut self.shared);
+        if !conn.state.is_closed() {
+            conn.out_queue.push(Packet::fin());
+            conn.flush(&mut self.shared)?;
+        }
         Ok(())
     }
 
@@ -530,9 +522,11 @@ impl Inner {
         let finalized = {
             let conn = &mut self.connections[token];
             conn.released = true;
-            conn.send_fin(false, &mut self.shared);
-            conn.state = State::FinSent;
-            let _ = conn.flush(&mut self.shared);
+            if !conn.state.is_closed() {
+                conn.out_queue.push(Packet::fin());
+                conn.state = State::FinSent;
+                let _ = conn.flush(&mut self.shared);
+            }
             conn.is_finalized()
         };
 
@@ -609,7 +603,7 @@ impl Inner {
                         };
 
                         if finalized {
-                            let conn = self.remove_connection(token);
+                            let _ = self.remove_connection(token);
                         }
 
                         Ok(())
@@ -931,7 +925,7 @@ impl Connection {
 
             let _ = shared.socket.send_to(p.as_slice(), &self.key.addr);
             self.state = State::Reset;
-            self.update_readiness();
+            self.update_readiness()?;
             return Ok(());
         }
 
@@ -1111,14 +1105,6 @@ impl Connection {
                 trace!("resetting timeout; duration={:?}", dur);
                 Instant::now() + dur
             });
-    }
-
-    fn send_fin(&mut self, _: bool, shared: &mut Shared) {
-        if self.state.is_closed() | !self.write_open {
-            return;
-        }
-
-        self.out_queue.push(Packet::fin());
     }
 
     fn is_finalized(&self) -> bool {

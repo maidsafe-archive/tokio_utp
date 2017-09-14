@@ -1,11 +1,8 @@
 use mio::{Poll, Token, Events, PollOpt, Ready};
 use std::io;
 use std::time::{Duration, Instant};
-use std::sync::mpsc;
-use std::thread;
 use std::fs::File;
 use std::io::Write;
-use std::cmp;
 use ::util;
 use ::UtpSocket;
 
@@ -24,7 +21,7 @@ fn round_trip() {
     single_round_trip(1_000_000, 0.0, true, Duration::new(10, 0));
 
     // test with packet loss
-    single_round_trip(1_000_000, 0.8, false, Duration::new(3600, 0));
+    //single_round_trip(1_000_000, 0.8, false, Duration::new(3600, 0));
 }
 
 fn single_round_trip(num_bytes: usize, loss_rate: f32, testing_disconnect: bool, time_limit: Duration) {
@@ -42,7 +39,7 @@ fn single_round_trip(num_bytes: usize, loss_rate: f32, testing_disconnect: bool,
     poll.register(&listener_b, Token(3), rw, PollOpt::edge()).unwrap();
 
     let addr = socket_b.local_addr().unwrap();
-    let mut stream_a = socket_a.connect(&addr).unwrap();
+    let stream_a = socket_a.connect(&addr).unwrap();
     stream_a.set_loss_rate(loss_rate);
     poll.register(&stream_a, Token(4), rw, PollOpt::edge()).unwrap();
     let mut stream_b = None;

@@ -51,7 +51,7 @@ fn ramp_up() {
         let mut total = 1380;
         let mut ts1 = 0;
 
-        for i in 0..4 {
+        for _ in 0..4 {
             let p = m.recv_from(&addr);
             ts1 = p.timestamp();
             assert_eq!(p.ty(), packet::Type::Data);
@@ -69,7 +69,7 @@ fn ramp_up() {
         p.set_timestamp_diff(ts2.wrapping_sub(ts1));
         m.send_to(p, &addr);
 
-        for i in 0..6 {
+        for _ in 0..6 {
             let p = m.recv_from(&addr);
             ts1 = p.timestamp();
             assert_eq!(p.ty(), packet::Type::Data);
@@ -87,7 +87,7 @@ fn ramp_up() {
         p.set_timestamp_diff(ts2.wrapping_sub(ts1));
         m.send_to(p, &addr);
 
-        for i in 0..8 {
+        for _ in 0..8 {
             let p = m.recv_from(&addr);
             ts1 = p.timestamp();
             assert_eq!(p.ty(), packet::Type::Data);
@@ -109,7 +109,7 @@ fn ramp_up() {
 
         m.send_to(p, &addr);
 
-        for i in 0..9 {
+        for _ in 0..9 {
             let p = m.recv_from(&addr);
             ts1 = p.timestamp();
             assert_eq!(p.ty(), packet::Type::Data);

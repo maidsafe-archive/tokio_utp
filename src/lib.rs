@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_variables)]
-
 extern crate mio;
 extern crate bytes;
 extern crate slab;

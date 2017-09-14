@@ -83,8 +83,4 @@ impl Delays {
 
         self.base_delay = self.base_delay.wrapping_add(offset);
     }
-
-    pub fn clear(&mut self) {
-        *self = Delays::new();
-    }
 }

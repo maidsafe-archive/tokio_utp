@@ -2,14 +2,12 @@ use super::prelude::*;
 
 #[test]
 fn accept_stream() {
-    const CONNECTION_ID: u16 = 25103;
-
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
     let (socket, listener) = Harness::new();
     let mock = Mock::new();
-    let server = mock.local_addr();
+    let _ = mock.local_addr();
 
     let addr = socket.local_addr();
     let th = mock.background(move |m| {
@@ -53,14 +51,12 @@ fn accept_stream() {
 
 #[test]
 fn dropping_listener() {
-    const CONNECTION_ID: u16 = 25103;
-
     let _ = ::env_logger::init();
     ::util::reset_rand();
 
     let (socket, _) = Harness::new();
     let mock = Mock::new();
-    let server = mock.local_addr();
+    let _ = mock.local_addr();
 
     let addr = socket.local_addr();
     let th = mock.background(move |m| {

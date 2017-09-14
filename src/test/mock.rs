@@ -145,6 +145,7 @@ impl Mock {
         }
     }
 
+    /*
     pub fn wait(&mut self, ms: u64) {
         let now = Instant::now();
         let dur = Duration::from_millis(ms);
@@ -158,6 +159,7 @@ impl Mock {
             self.recv(dur - elapsed);
         }
     }
+    */
 
     pub fn assert_quiescence(&mut self, ms: u64) {
         self.recv(Duration::from_millis(ms));

@@ -80,13 +80,6 @@ enum Item<'a> {
 const MAX_PACKET_SIZE: usize = 1_400;
 const MIN_PACKET_SIZE: usize = 150;
 
-const MAX_DATA_SIZE: usize = MAX_PACKET_SIZE - HEADER_LEN;
-const MIN_DATA_SIZE: usize = MIN_PACKET_SIZE - HEADER_LEN;
-
-const MICROS_PER_SEC: u32 = 1_000_000;
-const NANOS_PER_MS: u32 = 1_000_000;
-const NANOS_PER_MICRO: u32 = 1_000;
-
 impl OutQueue {
     /// Create a new `OutQueue` with the specified `seq_nr` and `ack_nr`
     pub fn new(connection_id: u16,
