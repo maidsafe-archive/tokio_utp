@@ -1,7 +1,8 @@
 //! Queue of outgoing packets.
 
 use {util, MAX_WINDOW_SIZE};
-use packet::{self, Packet, HEADER_LEN};
+use packet::{self, Packet};
+use smallvec::SmallVec;
 
 use std::{cmp, io};
 use std::collections::VecDeque;
@@ -42,6 +43,9 @@ struct State {
     // Sequence number of the last locally acked packet (aka, read)
     local_ack: Option<u16>,
 
+    // Bitfields indicating whether the next 32 packets have been received
+    selective_acks: [u8; 4],
+
     // Last outbound ack
     last_ack: Option<u16>,
 
@@ -79,6 +83,7 @@ enum Item<'a> {
 // MTU.
 const MAX_PACKET_SIZE: usize = 1_400;
 const MIN_PACKET_SIZE: usize = 150;
+const MAX_HEADER_SIZE: usize = 26;
 
 impl OutQueue {
     /// Create a new `OutQueue` with the specified `seq_nr` and `ack_nr`
@@ -92,6 +97,7 @@ impl OutQueue {
                 connection_id: connection_id,
                 seq_nr: seq_nr,
                 local_ack: local_ack,
+                selective_acks: [0; 4],
                 last_ack: None,
                 local_window: MAX_WINDOW_SIZE as u32,
                 created_at: Instant::now(),
@@ -127,24 +133,34 @@ impl OutQueue {
         self.peer_window = val;
     }
 
-    pub fn set_their_ack(&mut self, ack_nr: u16, now: Instant) -> Option<(usize, Duration)> {
+    pub fn set_their_ack(&mut self, ack_nr: u16, selective_acks: SmallVec<[u8; 4]>, now: Instant) -> Option<(usize, Duration)> {
         let mut acked_bytes = 0;
         let mut min_rtt = None;
 
+        let mut packet_index = 0;
         loop {
-            let pop = self.packets.front()
-                .map(|entry| {
-                    let seq_nr = entry.packet.seq_nr();
-                    ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr)
-                })
-                .unwrap_or(false);
-
+            let pop = {
+                let entry = match self.packets.get(packet_index) {
+                    Some(entry) => entry,
+                    None => break,
+                };
+                let seq_nr = entry.packet.seq_nr();
+                ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
+                    match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
+                        Some(index) => {
+                            selective_acks.get(index / 8).map(|b| *b).unwrap_or(0) & (1 << (index % 8)) != 0
+                        }
+                        None => false,
+                    }
+                }
+            };
             if !pop {
-                return min_rtt.map(|rtt| (acked_bytes, rtt));
+                packet_index += 1;
+                continue;
             }
 
             // The packet has been acked..
-            let p = self.packets.pop_front().unwrap();
+            let p = self.packets.remove(packet_index).unwrap();
 
             // If the packet has a payload, track the number of bytes sent
             acked_bytes += p.packet.payload().len();
@@ -167,7 +183,7 @@ impl OutQueue {
 
             if p.num_sends == 1 {
                 // Use the packet to update rtt & rtt_variance
-                let packet_rtt = util::as_ms(now.duration_since(last_sent_at));
+                let packet_rtt = util::as_ms(packet_rtt);
                 let delta = (self.rtt as i64 - packet_rtt as i64).abs();
 
                 self.rtt_variance += (delta - self.rtt_variance) / 4;
@@ -178,7 +194,9 @@ impl OutQueue {
                     self.rtt += (packet_rtt - self.rtt) / 8;
                 }
             }
+
         }
+        min_rtt.map(|rtt| (acked_bytes, rtt))
     }
 
     pub fn set_local_window(&mut self, val: usize) {
@@ -187,7 +205,7 @@ impl OutQueue {
     }
 
     /// Update peer ack
-    pub fn set_local_ack(&mut self, val: u16) {
+    pub fn set_local_ack(&mut self, val: u16, selective_acks: [u8; 4]) {
         // TODO: Since STATE packets can be lost, if any packet is received from
         // the remote, *some* sort of state packet needs to be sent out in the
         // near term future.
@@ -199,6 +217,7 @@ impl OutQueue {
         }
 
         self.state.local_ack = Some(val);
+        self.state.selective_acks = selective_acks;
     }
 
     /// Returns the socket timeout based on an aggregate of packet round trip
@@ -213,7 +232,7 @@ impl OutQueue {
             return Some(Duration::from_secs(1));
         }
 
-        let timeout = self.rtt as i64 + self.rtt_variance;
+        let timeout = self.rtt as i64 + 4 * self.rtt_variance;
 
         if timeout > 500 {
             Some(Duration::from_millis(timeout as u64))
@@ -250,6 +269,7 @@ impl OutQueue {
         let ts = self.timestamp();
         let diff = self.state.their_delay;
         let ack = self.state.local_ack.unwrap_or(0);
+        let selective_acks = self.state.selective_acks;
         let wnd_size = self.state.local_window;
 
         // Number of bytes in-flight
@@ -280,6 +300,7 @@ impl OutQueue {
             entry.packet.set_timestamp_diff(diff);
             entry.packet.set_ack_nr(ack);
             entry.packet.set_wnd_size(wnd_size);
+            entry.packet.set_selective_acks(selective_acks);
 
             return Some(Next {
                 item: Item::Entry(entry),
@@ -301,6 +322,7 @@ impl OutQueue {
             packet.set_timestamp_diff(diff);
             packet.set_ack_nr(ack);
             packet.set_wnd_size(wnd_size);
+            packet.set_selective_acks(selective_acks);
 
             return Some(Next {
                 item: Item::State(packet),
@@ -344,10 +366,10 @@ impl OutQueue {
 
         trace!("write; remaining={:?}; src={:?}", rem, src.len());
 
-        while rem > HEADER_LEN {
+        while rem > MAX_HEADER_SIZE {
             let packet_len = cmp::min(
                 MAX_PACKET_SIZE,
-                cmp::min(src.len(), rem - HEADER_LEN));
+                cmp::min(src.len(), rem - MAX_HEADER_SIZE));
 
             if packet_len == 0 {
                 break;
@@ -357,7 +379,7 @@ impl OutQueue {
             self.push(packet);
 
             len += packet_len;
-            rem -= packet_len + HEADER_LEN;
+            rem -= packet_len + MAX_HEADER_SIZE;
 
             src = &src[packet_len..];
         }
@@ -381,7 +403,7 @@ impl OutQueue {
     }
 
     pub fn is_writable(&self) -> bool {
-        self.remaining_capacity() > HEADER_LEN
+        self.remaining_capacity() > MAX_HEADER_SIZE
     }
 
     fn in_flight(&self) -> usize {

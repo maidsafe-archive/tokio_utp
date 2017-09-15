@@ -35,7 +35,7 @@ fn ramp_up() {
         // Receive start of the data
         let p = m.recv_from(&addr);
         assert_eq!(p.ty(), packet::Type::Data);
-        assert_eq!(p.payload().len(), 1380);
+        assert_eq!(p.payload().len(), 1374);
         let ts1 = p.timestamp();
         let ts2 = t.timestamp();
 
@@ -48,7 +48,7 @@ fn ramp_up() {
         p.set_timestamp_diff(ts2.wrapping_sub(ts1));
         m.send_to(p, &addr);
 
-        let mut total = 1380;
+        let mut total = 1374;
         let mut ts1 = 0;
 
         for _ in 0..4 {
@@ -57,7 +57,7 @@ fn ramp_up() {
             assert_eq!(p.ty(), packet::Type::Data);
             total += p.len();
         }
-        assert_eq!(total, 5737);
+        assert_eq!(total, 5694);
 
         let ts2 = t.timestamp();
 
@@ -75,7 +75,7 @@ fn ramp_up() {
             assert_eq!(p.ty(), packet::Type::Data);
             total += p.len();
         }
-        assert_eq!(total, 13038);
+        assert_eq!(total, 12930);
 
         let ts2 = t.timestamp();
 
@@ -93,7 +93,7 @@ fn ramp_up() {
             assert_eq!(p.ty(), packet::Type::Data);
             total += p.len();
         }
-        assert_eq!(total, 23289);
+        assert_eq!(total, 23089);
 
         sleep(200);
         let ts2 = t.timestamp();
@@ -115,7 +115,7 @@ fn ramp_up() {
             assert_eq!(p.ty(), packet::Type::Data);
             total += p.len();
         }
-        assert_eq!(total, 36069);
+        assert_eq!(total, 34491);
 
         sleep(200);
         let ts2 = t.timestamp();

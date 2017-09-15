@@ -35,8 +35,16 @@ impl InQueue {
     }
 
     /// Returns the seq number of the last remote packet to ack
-    pub fn ack_nr(&self) -> u16 {
-        self.ack_nr.unwrap_or(0)
+    pub fn ack_nr(&self) -> (u16, [u8; 4]) {
+        let ack_nr = self.ack_nr.unwrap_or(0);
+        let mut selective_acks = [0; 4];
+        for i in 0..(MAX_DELTA_SEQ - 2) {
+            let slot = (ack_nr as usize + i + 2) % MAX_DELTA_SEQ;
+            if let Some(..) = self.packets[slot] {
+                selective_acks[i / 8] |= 1 << (i % 8);
+            }
+        }
+        (ack_nr, selective_acks)
     }
 
     /// Poll the next CTL packet for processing. Data packets are queued for

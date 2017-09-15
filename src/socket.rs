@@ -800,7 +800,6 @@ impl Connection {
             // connection into the connected state.
             if self.state == State::SynSent {
                 self.in_queue.set_initial_ack_nr(packet.seq_nr());
-                self.out_queue.set_local_ack(packet.seq_nr());
                 self.out_queue.set_peer_window(packet.wnd_size());
 
                 self.state = State::Connected;
@@ -847,7 +846,8 @@ impl Connection {
                self.in_queue.ack_nr());
 
         self.update_local_window();
-        self.out_queue.set_local_ack(self.in_queue.ack_nr());
+        let (ack_nr, selective_acks) = self.in_queue.ack_nr();
+        self.out_queue.set_local_ack(ack_nr, selective_acks);
         self.last_recv_time = Instant::now();
 
         // Reset the timeout
@@ -1019,7 +1019,11 @@ impl Connection {
         }
 
         // Ack all packets
-        if let Some((acked_bytes, min_rtt)) = self.out_queue.set_their_ack(packet.ack_nr(), now) {
+        if let Some((acked_bytes, min_rtt)) = self.out_queue.set_their_ack(
+            packet.ack_nr(),
+            packet.selective_acks(),
+            now,
+        ) {
             let min_rtt = util::as_wrapping_micros(min_rtt);
 
             if let Some(delay) = self.our_delays.get() {

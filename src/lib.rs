@@ -3,6 +3,7 @@ extern crate bytes;
 extern crate slab;
 extern crate rand;
 extern crate byteorder;
+extern crate smallvec;
 
 #[macro_use]
 extern crate log;
