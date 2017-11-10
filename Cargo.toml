@@ -1,5 +1,5 @@
 [package]
-name = "utp2"
+name = "tokio-utp"
 version = "0.1.0"
 authors = ["Carl Lerche <me@carllerche.com>"]
 license = "MIT/Apache-2.0"
@@ -17,6 +17,11 @@ slab = "0.4.0"
 byteorder = "1.0"
 log = "0.3.7"
 smallvec = "0.4"
+tokio-core = "*"
+tokio-io = "*"
+unwrap = "1.1.0"
+futures = "*"
+void = "*"
 
 [dev-dependencies]
 env_logger = "0.4.2"

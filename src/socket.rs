@@ -4,13 +4,19 @@ use in_queue::InQueue;
 use out_queue::OutQueue;
 use packet::{self, Packet};
 
-use mio::net::UdpSocket;
-use mio::{Evented, Registration, SetReadiness, Ready, Poll, PollOpt, Token};
+//use mio::net::UdpSocket;
+use tokio_core::net::UdpSocket;
+use tokio_core::reactor::{Timeout, Handle, PollEvented};
+use tokio_io::{AsyncRead, AsyncWrite};
+use mio::{Registration, SetReadiness, Ready};
+use futures::{Async, Future, Stream};
+use futures::sync::oneshot;
+use void::Void;
 
 use bytes::{BytesMut, BufMut};
 use slab::Slab;
 
-use std::{cmp, io, u32};
+use std::{cmp, io, mem, u32};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::net::SocketAddr;
@@ -20,6 +26,7 @@ use std::time::{Duration, Instant};
 pub struct UtpSocket {
     // Shared state
     inner: InnerCell,
+    req_finalize: oneshot::Sender<oneshot::Sender<()>>,
 }
 
 /// Manages the state for a single UTP connection
@@ -31,7 +38,7 @@ pub struct UtpStream {
     token: usize,
 
     // Mio registration
-    registration: Registration,
+    registration: PollEvented<Registration>,
 }
 
 pub struct UtpListener {
@@ -39,7 +46,7 @@ pub struct UtpListener {
     inner: InnerCell,
 
     // Used to register interest in accepting UTP sockets
-    registration: Registration,
+    registration: PollEvented<Registration>,
 }
 
 // Shared between the UtpSocket and each UtpStream
@@ -47,6 +54,9 @@ struct Inner {
     // State that needs to be passed to `Connection`. This is broken out to make
     // the borrow checker happy.
     shared: Shared,
+
+    // Handle to the event loop.
+    handle: Handle,
 
     // Connection specific state
     connections: Slab<Connection>,
@@ -62,6 +72,8 @@ struct Inner {
     listener: SetReadiness,
 
     listener_open: bool,
+
+    filter: Option<Filter>,
 }
 
 struct Shared {
@@ -151,6 +163,7 @@ enum State {
 }
 
 type InnerCell = Rc<RefCell<Inner>>;
+pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut>>;
 
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
@@ -166,8 +179,8 @@ const MAX_DATA_SIZE: usize = 1_400 - 20;
 
 impl UtpSocket {
     /// Bind a new `UtpSocket` to the given socket address
-    pub fn bind(addr: &SocketAddr) -> io::Result<(UtpSocket, UtpListener)> {
-        UdpSocket::bind(addr).map(UtpSocket::from_socket)
+    pub fn bind(addr: &SocketAddr, handle: &Handle) -> io::Result<(UtpSocket, UtpListener)> {
+        UdpSocket::bind(addr, handle).and_then(|s| UtpSocket::from_socket(s, handle))
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -175,39 +188,58 @@ impl UtpSocket {
     }
 
     /// Create a new `Utpsocket` backed by the provided `UdpSocket`.
-    pub fn from_socket(socket: UdpSocket) -> (UtpSocket, UtpListener) {
-        let (registration, set_readiness) = Registration::new2();
+    pub fn from_socket(socket: UdpSocket, handle: &Handle) -> io::Result<(UtpSocket, UtpListener)> {
+        let (listener_registration, listener_set_readiness) = Registration::new2();
+        let (finalize_tx, finalize_rx) = oneshot::channel();
 
         let inner = Rc::new(RefCell::new(Inner {
             shared: Shared {
                 socket: socket,
                 ready: Ready::empty(),
             },
+            handle: handle.clone(),
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
             in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
             accept_buf: VecDeque::new(),
-            listener: set_readiness,
+            listener: listener_set_readiness,
             listener_open: true,
+            filter: None,
         }));
 
         let listener = UtpListener {
             inner: inner.clone(),
-            registration: registration,
+            registration: PollEvented::new(listener_registration, handle)?,
         };
 
         let socket = UtpSocket {
-            inner: inner,
+            inner: inner.clone(),
+            req_finalize: finalize_tx,
         };
 
-        (socket, listener)
+        let next_tick = Instant::now() + Duration::from_millis(500);
+        let timeout = Timeout::new_at(next_tick, handle)?;
+        let refresher = SocketRefresher {
+            inner: inner,
+            next_tick: next_tick,
+            timeout: timeout,
+            req_finalize: finalize_rx,
+        };
+        handle.spawn(refresher);
+
+        Ok((socket, listener))
     }
 
     /// Connect a new `UtpSocket` to the given remote socket address
-    pub fn connect(&self, addr: &SocketAddr) -> io::Result<UtpStream> {
-        self.inner.borrow_mut().connect(addr, &self.inner)
+    pub fn connect(&self, addr: &SocketAddr) -> UtpStreamConnect {
+        let state = match self.inner.borrow_mut().connect(addr, &self.inner) {
+            Ok(stream) => UtpStreamConnectState::Waiting(stream),
+            Err(e) => UtpStreamConnectState::Err(e),
+        };
+        UtpStreamConnect { state }
     }
 
+    /*
     /// Called whenever the socket readiness changes
     /// Returns true if all connections have been finalised.
     pub fn ready(&self, ready: Ready) -> io::Result<bool> {
@@ -218,8 +250,22 @@ impl UtpSocket {
     pub fn tick(&self) -> io::Result<()> {
         self.inner.borrow_mut().tick()
     }
+    */
+
+    pub fn finalize(self) -> UtpSocketFinalize {
+        let (respond_tx, respond_rx) = oneshot::channel();
+        unwrap!(self.req_finalize.send(respond_tx));
+        UtpSocketFinalize {
+            resp_finalize: respond_rx,
+        }
+    }
+
+    pub fn set_filter(&self, filter: Option<Filter>) -> Option<Filter> {
+        mem::replace(&mut self.inner.borrow_mut().filter, filter)
+    }
 }
 
+/*
 impl Evented for UtpSocket {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
         -> io::Result<()>
@@ -237,6 +283,7 @@ impl Evented for UtpSocket {
         self.inner.borrow_mut().shared.socket.deregister(poll)
     }
 }
+*/
 
 impl UtpListener {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -247,7 +294,25 @@ impl UtpListener {
     ///
     /// This function will also advance the state of all associated connections.
     pub fn accept(&self) -> io::Result<UtpStream> {
-        self.inner.borrow_mut().accept()
+        if let Async::NotReady = self.registration.poll_read() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
+        match self.inner.borrow_mut().accept() {
+            Err(e) => {
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    self.registration.need_read();
+                }
+                Err(e)
+            },
+            Ok(stream) => Ok(stream),
+        }
+    }
+
+    pub fn incoming(self) -> Incoming {
+        Incoming {
+            listener: self,
+        }
     }
 }
 
@@ -269,6 +334,7 @@ impl UtpListener {
     }
 }
 
+/*
 impl Evented for UtpListener {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
         -> io::Result<()>
@@ -286,6 +352,7 @@ impl Evented for UtpListener {
         Evented::deregister(&self.registration, poll)
     }
 }
+*/
 
 impl UtpStream {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -293,12 +360,17 @@ impl UtpStream {
         inner.shared.socket.local_addr()
     }
 
-    pub fn read(&self, dst: &mut [u8]) -> io::Result<usize> {
+    pub fn read_immutable(&self, dst: &mut [u8]) -> io::Result<usize> {
+        if let Async::NotReady = self.registration.poll_read() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
         let mut inner = self.inner.borrow_mut();
         let connection = &mut inner.connections[self.token];
 
         match connection.in_queue.read(dst) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.registration.need_read();
                 if connection.state == State::Connected && connection.read_open {
                     connection.update_readiness()?;
                     Err(io::ErrorKind::WouldBlock.into())
@@ -315,17 +387,30 @@ impl UtpStream {
         }
     }
 
-    pub fn write(&self, src: &[u8]) -> io::Result<usize> {
-        self.inner.borrow_mut().write(self.token, src)
+    pub fn write_immutable(&self, src: &[u8]) -> io::Result<usize> {
+        if let Async::NotReady = self.registration.poll_write() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
+        match self.inner.borrow_mut().write(self.token, src) {
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.registration.need_write();
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            ret => ret,
+        }
     }
 
     pub fn shutdown_write(&self) -> io::Result<()> {
         self.inner.borrow_mut().shutdown_write(self.token)
     }
 
-    // Returns true if all outgoing data was written.
-    pub fn flush(&self) -> io::Result<bool> {
-        self.inner.borrow_mut().flush(self.token)
+    // Returns Ok(()) if all outgoing data has been written.
+    pub fn flush_immutable(&self) -> io::Result<()> {
+        if !self.inner.borrow_mut().flush(self.token)? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        Ok(())
     }
 
     pub fn set_disconnect_timeout(&self, duration: Duration) {
@@ -362,6 +447,7 @@ impl Drop for UtpStream {
     }
 }
 
+/*
 impl Evented for UtpStream {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
         -> io::Result<()>
@@ -379,6 +465,7 @@ impl Evented for UtpStream {
         Evented::deregister(&self.registration, poll)
     }
 }
+*/
 
 impl Inner {
     fn accept(&mut self) -> io::Result<UtpStream> {
@@ -466,6 +553,7 @@ impl Inner {
         out_queue.push(packet);
 
         let (registration, set_readiness) = Registration::new2();
+        let registration = PollEvented::new(registration, &self.handle)?;
         let now = Instant::now();
 
         let mut connection = Connection {
@@ -570,6 +658,21 @@ impl Inner {
         Ok(self.connection_lookup.is_empty())
     }
 
+    fn refresh(&mut self, inner: &InnerCell) -> io::Result<Async<bool>> {
+        let mut ready = Ready::empty();
+        if let Async::Ready(()) = self.shared.socket.poll_read() {
+            ready |= Ready::readable();
+        }
+        if let Async::Ready(()) = self.shared.socket.poll_write() {
+            ready |= Ready::writable();
+        }
+        if ready.is_empty() {
+            Ok(Async::NotReady)
+        } else {
+            Ok(Async::Ready(self.ready(ready, inner)?))
+        }
+    }
+
     fn tick(&mut self) -> io::Result<()> {
         trace!("Socket::tick");
         for &idx in self.connection_lookup.values() {
@@ -656,6 +759,7 @@ impl Inner {
         }
 
         let (registration, set_readiness) = Registration::new2();
+        let registration = PollEvented::new(registration, &self.handle)?;
 
         let now = Instant::now();
 
@@ -705,20 +809,33 @@ impl Inner {
     }
 
     fn recv_from(&mut self) -> io::Result<(Packet, SocketAddr)> {
-        // Ensure the buffer has at least 4kb of available space.
-        self.in_buf.reserve(MIN_BUFFER_SIZE);
+        loop {
+            // Ensure the buffer has at least 4kb of available space.
+            self.in_buf.reserve(MIN_BUFFER_SIZE);
 
-        // Read in the bytes
-        let addr = unsafe {
-            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
-            self.in_buf.advance_mut(n);
-            addr
-        };
+            // Read in the bytes
+            let addr = unsafe {
+                let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+                self.in_buf.advance_mut(n);
+                addr
+            };
 
-        // Try loading the header
-        let packet = Packet::parse(self.in_buf.take())?;
+            let bytes = self.in_buf.take();
+            let bytes = if let Some(ref mut filter) = self.filter {
+                if let Some(bytes) = filter(bytes) {
+                    bytes
+                } else {
+                    continue
+                }
+            } else {
+                bytes
+            };
 
-        Ok((packet, addr))
+            // Try loading the header
+            let packet = Packet::parse(bytes)?;
+
+            return Ok((packet, addr));
+        }
     }
 
     fn flush_all(&mut self) -> io::Result<bool> {
@@ -1166,3 +1283,140 @@ impl Key {
         }
     }
 }
+
+pub struct UtpStreamConnect {
+    state: UtpStreamConnectState,
+}
+
+enum UtpStreamConnectState {
+    Err(io::Error),
+    Empty,
+    Waiting(UtpStream),
+}
+
+impl Future for UtpStreamConnect {
+    type Item = UtpStream;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> io::Result<Async<UtpStream>> {
+        let inner = mem::replace(&mut self.state, UtpStreamConnectState::Empty);
+        match inner {
+            UtpStreamConnectState::Waiting(stream) => {
+                match stream.registration.poll_write() {
+                    Async::NotReady => {
+                        mem::replace(&mut self.state, UtpStreamConnectState::Waiting(stream));
+                        Ok(Async::NotReady)
+                    },
+                    Async::Ready(()) => {
+                        Ok(Async::Ready(stream))
+                    },
+                }
+            },
+            UtpStreamConnectState::Err(e) => Err(e),
+            UtpStreamConnectState::Empty => panic!("can't poll UtpStreamConnect twice!"),
+        }
+    }
+}
+
+struct SocketRefresher {
+    inner: InnerCell,
+    next_tick: Instant,
+    timeout: Timeout,
+    req_finalize: oneshot::Receiver<oneshot::Sender<()>>,
+}
+
+impl Future for SocketRefresher {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Result<Async<()>, ()> {
+        self.poll_inner().map_err(|e| {
+            error!("UtpSocket died! {:?}", e);
+        })
+    }
+}
+
+impl SocketRefresher {
+    fn poll_inner(&mut self) -> io::Result<Async<()>> {
+        loop {
+            match self.timeout.poll()? {
+                Async::Ready(()) => {
+                    self.inner.borrow_mut().tick()?;
+                    self.next_tick += Duration::from_millis(500);
+                    self.timeout.reset(self.next_tick);
+                },
+                Async::NotReady => break,
+            }
+        }
+
+        if let Async::Ready(true) = self.inner.borrow_mut().refresh(&self.inner)? {
+            if 1 == Rc::strong_count(&self.inner) {
+                if let Ok(Async::Ready(resp_finalize)) = self.req_finalize.poll() {
+                    let _ = resp_finalize.send(());
+                }
+                return Ok(Async::Ready(()));
+            }
+        }
+        Ok(Async::NotReady)
+    }
+}
+
+
+pub struct UtpSocketFinalize {
+    resp_finalize: oneshot::Receiver<()>,
+}
+
+impl Future for UtpSocketFinalize {
+    type Item = ();
+    type Error = Void;
+
+    fn poll(&mut self) -> Result<Async<()>, Void> {
+        if let Async::Ready(()) = unwrap!(self.resp_finalize.poll()) {
+            return Ok(Async::Ready(()));
+        }
+        Ok(Async::NotReady)
+    }
+}
+
+pub struct Incoming {
+    listener: UtpListener,
+}
+
+impl Stream for Incoming {
+    type Item = UtpStream;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> io::Result<Async<Option<UtpStream>>> {
+        match self.listener.accept() {
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(Async::NotReady),
+            Err(e) => Err(e),
+            Ok(s) => Ok(Async::Ready(Some(s))),
+        }
+    }
+}
+
+impl io::Read for UtpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_immutable(buf)
+    }
+}
+
+impl io::Write for UtpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write_immutable(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_immutable()
+    }
+}
+
+impl AsyncRead for UtpStream { }
+
+impl AsyncWrite for UtpStream {
+    fn shutdown(&mut self) -> io::Result<Async<()>> {
+        self.shutdown_write()?;
+        Ok(Async::Ready(()))
+    }
+}
+

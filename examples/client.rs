@@ -1,52 +1,52 @@
-extern crate utp2;
-extern crate mio;
+extern crate tokio_utp;
 extern crate env_logger;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate futures;
+extern crate void;
+#[macro_use]
+extern crate unwrap;
 
-use mio::*;
-use utp2::*;
+use tokio_utp::*;
+
+use tokio_core::reactor::Core;
+use futures::{future, Future};
+use void::Void;
 
 use std::net::SocketAddr;
 
 pub fn main() {
-    ::env_logger::init().unwrap();
+    unwrap!(::env_logger::init());
 
-    let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let remote_addr: SocketAddr = "127.0.0.1:4561".parse().unwrap();
+    let local_addr: SocketAddr = unwrap!("127.0.0.1:0".parse());
+    let remote_addr: SocketAddr = unwrap!("127.0.0.1:4561".parse());
 
-    let (socket, _) = UtpSocket::bind(&local_addr).unwrap();
+    let mut core = unwrap!(Core::new());
+    let handle = core.handle();
 
-    // Connect to the remote
-    let stream = socket.connect(&remote_addr).unwrap();
+    let _: Result<(), Void> = core.run(future::lazy(|| {
+        let (socket, _) = unwrap!(UtpSocket::bind(&local_addr, &handle));
 
-    let poll = Poll::new().unwrap();
-    let mut events = Events::with_capacity(1024);
+        // connect to the server
+        socket.connect(&remote_addr).and_then(|stream| {
 
-    poll.register(&socket, Token(0), Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
-    poll.register(&stream, Token(1), Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
+            // send it some data
+            println!("sending \"hello world\" to server");
+            tokio_io::io::write_all(stream, "hello world").and_then(|(stream, _)| {
 
-    println!("bound...");
+                // shutdown our the write side of the connection.
+                tokio_io::io::shutdown(stream).and_then(|stream| {
 
-    let mut stream = Some(stream);
-
-    loop {
-        poll.poll(&mut events, None).unwrap();
-
-        for event in &events {
-            match event.token() {
-                Token(0) => {
-                    socket.ready(event.readiness()).unwrap();
-                }
-                Token(1) => {
-                    if event.readiness().is_writable() {
-                        // A bit hacky, we know right now that this will never
-                        // return WouldBlock
-                        stream.as_ref().unwrap().write("hello world".as_bytes()).unwrap();
-                    }
-
-                    stream = None;
-                }
-                _ => {}
-            }
-        }
-    }
+                    // read the stream to completion.
+                    tokio_io::io::read_to_end(stream, Vec::new()).and_then(|(_, data)| {
+                        println!("received {:?} from server", String::from_utf8(data));
+                        Ok(())
+                    })
+                })
+            })
+        }).then(|res| {
+            unwrap!(res);
+            Ok(())
+        })
+    }));
 }

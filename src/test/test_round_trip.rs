@@ -1,209 +1,150 @@
-use mio::{Poll, Token, Events, PollOpt, Ready};
-use std::io;
-use std::time::{Duration, Instant};
+use UtpSocket;
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::fs::File;
 use std::io::Write;
-use ::util;
-use ::UtpSocket;
+use tokio_core::reactor::Core;
+use tokio_io;
+use tokio_io::AsyncRead;
+use futures::future;
+use futures::{Future, Stream};
+use rand;
+use rand::Rng;
 
-#[test]
-fn round_trip() {
-    let _ = ::env_logger::init();
-    ::util::reset_rand();
-
-    single_round_trip(1, 0.0, false, Duration::from_millis(100));
-    single_round_trip(10, 0.0, false, Duration::from_millis(100));
-    single_round_trip(100, 0.0, false, Duration::from_millis(100));
-    single_round_trip(1_000, 0.0, false, Duration::from_millis(100));
-    single_round_trip(1_000_000, 0.0, false, Duration::new(10, 0));
-
-    // test a disconnect
-    single_round_trip(1_000_000, 0.0, true, Duration::new(10, 0));
-
-    // test with packet loss
-    //single_round_trip(1_000_000, 0.8, false, Duration::new(3600, 0));
+trait FutureExt: Sized + Future + 'static {
+    fn sendless_boxed(self) -> Box<Future<Item=Self::Item, Error=Self::Error> + 'static> {
+        Box::new(self)
+    }
 }
 
-fn single_round_trip(num_bytes: usize, loss_rate: f32, testing_disconnect: bool, time_limit: Duration) {
-    let before = Instant::now();
-    let disconnect_timeout = Duration::new(5, 0);
-    let mut disconnect_time: Option<Instant> = None;
+impl<T: Future + 'static> FutureExt for T {}
 
-    let poll = Poll::new().unwrap();
-    let rw = Ready::readable() | Ready::writable();
-    let (socket_a, listener_a) = UtpSocket::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
-    poll.register(&socket_a, Token(0), rw, PollOpt::edge()).unwrap();;
-    poll.register(&listener_a, Token(1), rw, PollOpt::edge()).unwrap();
-    let (socket_b, listener_b) = UtpSocket::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
-    poll.register(&socket_b, Token(2), rw, PollOpt::edge()).unwrap();
-    poll.register(&listener_b, Token(3), rw, PollOpt::edge()).unwrap();
+#[test]
+fn send_lots_of_data_one_way() {
+    const NUM_TESTS: usize = 100;
 
-    let addr = socket_b.local_addr().unwrap();
-    let stream_a = socket_a.connect(&addr).unwrap();
-    stream_a.set_loss_rate(loss_rate);
-    poll.register(&stream_a, Token(4), rw, PollOpt::edge()).unwrap();
-    let mut stream_b = None;
+    let _ = ::env_logger::init();
 
-    let send_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| util::rand()).collect();
-    let mut recv_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| 0).collect();
-    let mut middle_buf: Vec<u8> = (0..num_bytes).into_iter().map(|_| 1).collect();
-    let mut bytes_sent_a = 0;
-    let mut bytes_recv_a = 0;
-    let mut bytes_sent_b = 0;
-    let mut bytes_recv_b = 0;
-    let mut bytes_to_check = num_bytes;
-    let mut disconnected_a = false;
-    let mut disconnected_b = false;
-
-    let tick_duration = Duration::from_millis(500);
-    let mut next_tick = Instant::now() + tick_duration;
-    'big_loop: loop {
-        let now = Instant::now();
-        if now > before + time_limit {
-            panic!("Timed out!");
-        }
-        let duration = loop {
-            if now > next_tick {
-                socket_a.tick().unwrap();
-                socket_b.tick().unwrap();
-                next_tick += tick_duration;
-            } else {
-                break next_tick - now;
-            }
-        };
-
-        let mut events = Events::with_capacity(4);
-        poll.poll(&mut events, Some(duration)).unwrap();
-        for event in &events {
-            match event.token() {
-                Token(0) => {
-                    let _ = socket_a.ready(event.readiness()).unwrap();
-                },
-                Token(1) => (),
-                Token(2) => {
-                    let _ = socket_b.ready(event.readiness()).unwrap();
-                },
-                Token(3) => {
-                    match listener_b.accept() {
-                        Ok(stream) => {
-                            stream.set_loss_rate(loss_rate);
-                            poll.register(&stream, Token(5), rw, PollOpt::edge()).unwrap();
-                            assert!(stream_b.is_none());
-                            stream_b = Some(stream);
-                        },
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                        Err(e) => panic!("error: {:?}", e),
-                    }
-                },
-                Token(4) => {
-                    if event.readiness().is_readable() {
-                        match stream_a.read(&mut recv_buf[bytes_recv_a..]) {
-                            Ok(n) => {
-                                if recv_buf[bytes_recv_a..bytes_recv_a + n] != middle_buf[bytes_recv_a..bytes_recv_a + n] {
-                                    panic!("(a) Data corrupted! {} .. {}", bytes_recv_a, bytes_recv_a + n);
-                                }
-                                bytes_recv_a += n;
-                                if bytes_recv_a == num_bytes {
-                                    break 'big_loop;
-                                }
-                            },
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                            Err(e) => {
-                                if e.kind() == io::ErrorKind::ConnectionReset {
-                                    let now = Instant::now();
-                                    let target = disconnect_time.unwrap() + disconnect_timeout;
-                                    let diff = if now > target { now - target } else { target - now };
-                                    assert!(diff < Duration::from_millis(600));
-                                    disconnected_a = true;
-                                    bytes_to_check = bytes_recv_a;
-                                    if disconnected_a && disconnected_b {
-                                        break 'big_loop;
-                                    }
-                                } else {
-                                    panic!("error: {:?}", e);
-                                }
-                            },
-                        };
-                    }
-                    if event.readiness().is_writable() && bytes_sent_a < num_bytes {
-                        match stream_a.write(&send_buf[bytes_sent_a..]) {
-                            Ok(n) => {
-                                bytes_sent_a += n;
-                            },
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                            Err(e) => panic!("error: {:?}", e),
-                        };
-                        if let Some(ref stream) = stream_b {
-                            if testing_disconnect && bytes_sent_a >= num_bytes / 2 && disconnect_time.is_none() {
-                                stream_a.set_loss_rate(1.0);
-                                stream_a.set_disconnect_timeout(disconnect_timeout);
-                                stream.set_loss_rate(1.0);
-                                stream.set_disconnect_timeout(disconnect_timeout);
-                                disconnect_time = Some(Instant::now());
-                            }
-                        }
-                    }
-                },
-                Token(5) => {
-                    let stream_b = stream_b.as_ref().unwrap();
-                    if event.readiness().is_readable() {
-                        match stream_b.read(&mut middle_buf[bytes_recv_b..]) {
-                            Ok(n) => {
-                                if middle_buf[bytes_recv_b..bytes_recv_b + n] != send_buf[bytes_recv_b..bytes_recv_b + n] {
-                                    panic!("(b) Data corrupted! {} .. {}", bytes_recv_a, bytes_recv_a + n);
-                                }
-                                bytes_recv_b += n;
-                            },
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                            Err(e) => {
-                                if e.kind() == io::ErrorKind::ConnectionReset {
-                                    let now = Instant::now();
-                                    let target = disconnect_time.unwrap() + disconnect_timeout;
-                                    let diff = if now > target { now - target } else { target - now };
-                                    assert!(diff < Duration::from_millis(600));
-                                    disconnected_b = true;
-                                    if disconnected_a && disconnected_b {
-                                        break 'big_loop;
-                                    }
-                                } else {
-                                    panic!("error: {:?}", e);
-                                }
-                            },
-                        };
-                    }
-                    if bytes_recv_b - bytes_sent_b > 0 {
-                        match stream_b.write(&middle_buf[bytes_sent_b..bytes_recv_b]) {
-                            Ok(n) => {
-                                bytes_sent_b += n;
-                            },
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                            Err(e) => panic!("error: {:?}", e),
-                        };
-                    }
-                },
-                t => panic!("whaa? {:?}", t),
-            }
-        }
+    send_data_one_way(0);
+    send_data_one_way(1);
+    for i in 0..NUM_TESTS {
+        info!("Test {} of {}", i + 1, NUM_TESTS);
+        let num_bytes = rand::thread_rng().gen_range(1024 * 1024, 1024 * 1024 * 20);
+        send_data_one_way(num_bytes);
     }
+}
 
-    let send_buf = &send_buf[..bytes_to_check];
-    let recv_buf = &recv_buf[..bytes_to_check];
-    let middle_buf = &middle_buf[..bytes_to_check];
+#[test]
+fn send_lots_of_data_round_trip() {
+    const NUM_TESTS: usize = 100;
 
-    if send_buf != recv_buf {
-        let mut send = File::create("mio-utp-round-trip-failed-send.dat").unwrap();
-        let mut recv = File::create("mio-utp-round-trip-failed-recv.dat").unwrap();
-        let mut middle = File::create("mio-utp-round-trip-failed-middle.dat").unwrap();
-        send.write_all(&send_buf).unwrap();
-        recv.write_all(&recv_buf).unwrap();
-        middle.write_all(&middle_buf).unwrap();
-        panic!("Data corrupted during round-trip! \
-               Sent/intermediate/received data saved to mio-utp-round-trip-failed-send.dat, \
-               mio-utp-round-trip-middle.dat and mio-utp-round-trip-failed-recv.dat");
+    let _ = ::env_logger::init();
+
+    send_data_round_trip(0);
+    send_data_round_trip(1);
+    for i in 0..NUM_TESTS {
+        info!("Test {} of {}", i + 1, NUM_TESTS);
+        let num_bytes = rand::thread_rng().gen_range(1024 * 1024, 1024 * 1024 * 20);
+        //let num_bytes = rand::thread_rng().gen_range(1024, 1024 * 1024 * 20);
+        send_data_round_trip(num_bytes);
     }
+}
 
-    let after = Instant::now();
-    let duration = after - before;
-    info!("time taken == {}s + {}ns", duration.as_secs(), duration.subsec_nanos());
+fn send_data_round_trip(num_bytes: usize) {
+    println!("== sending {} bytes", num_bytes);
+
+    let random_send = {
+        let mut random_send = Vec::with_capacity(num_bytes);
+        unsafe { random_send.set_len(num_bytes) };
+        rand::thread_rng().fill_bytes(&mut random_send[..]);
+        random_send
+    };
+
+    let addr = unwrap!(SocketAddr::from_str("127.0.0.1:0"));
+    
+    let mut core = unwrap!(Core::new());
+    let handle = core.handle();
+    let res = core.run(future::lazy(|| {
+        let (socket_a, _) = unwrap!(UtpSocket::bind(&addr, &handle));
+        let (_, listener_b) = unwrap!(UtpSocket::bind(&addr, &handle));
+        
+        let task0 = socket_a.connect(&unwrap!(listener_b.local_addr())).and_then(|stream_a| {
+            let (read_half_a, write_half_a) = stream_a.split();
+            let task0 = tokio_io::io::write_all(write_half_a, random_send)
+                .and_then(|(write_half_a, random_send)| {
+                    trace!("finished writing from (a)");
+                    tokio_io::io::shutdown(write_half_a).map(|_| random_send)
+                })
+                .sendless_boxed();
+            let task1 = tokio_io::io::read_to_end(read_half_a, Vec::new()).map(|(_, random_recv)| {
+                trace!("finished reading at (a)");
+                random_recv
+            })
+                .sendless_boxed();
+            task0.join(task1).sendless_boxed()
+        });
+        let task1 = listener_b.incoming().into_future().map_err(|(e, _)| e).and_then(|(stream_b, _)| {
+            let stream_b = unwrap!(stream_b);
+            let (read_half_b, write_half_b) = stream_b.split();
+            tokio_io::io::copy(read_half_b, write_half_b)
+                .and_then(|(_, _, write_half_b)| {
+                    trace!("finished copying at (b)");
+                    tokio_io::io::shutdown(write_half_b)
+                })
+                .sendless_boxed()
+        });
+        task0.join(task1).map(|((random_send, random_recv), _)| {
+            if random_send != random_recv {
+                let mut send = unwrap!(File::create("round-trip-failed-send.dat"));
+                let mut recv = unwrap!(File::create("round-trip-failed-recv.dat"));
+                unwrap!(send.write_all(&random_send));
+                unwrap!(recv.write_all(&random_recv));
+                panic!("Data corrupted during round-trip! Sent/received data saved to round-trip-failed-send.dat and round-trip-failed-recv.dat");
+            }
+        }).sendless_boxed()
+    }));
+    unwrap!(res);
+}
+
+fn send_data_one_way(num_bytes: usize) {
+    let random_send = {
+        let mut random_send = Vec::with_capacity(num_bytes);
+        unsafe { random_send.set_len(num_bytes) };
+        rand::thread_rng().fill_bytes(&mut random_send[..]);
+        random_send
+    };
+
+    let addr = unwrap!(SocketAddr::from_str("127.0.0.1:0"));
+    
+    let mut core = unwrap!(Core::new());
+    let handle = core.handle();
+    let res = core.run(future::lazy(|| {
+        let (socket_a, _) = unwrap!(UtpSocket::bind(&addr, &handle));
+        let (_, listener_b) = unwrap!(UtpSocket::bind(&addr, &handle));
+        
+        let task0 = socket_a.connect(&unwrap!(listener_b.local_addr())).and_then(|stream_a| {
+            tokio_io::io::write_all(stream_a, random_send)
+                .and_then(|(stream_a, random_send)| {
+                    tokio_io::io::shutdown(stream_a).map(|_| random_send)
+                })
+                .sendless_boxed()
+        });
+        let task1 = listener_b.incoming().into_future().map_err(|(e, _)| e).and_then(|(stream_b, _)| {
+            let stream_b = unwrap!(stream_b);
+            tokio_io::io::read_to_end(stream_b, Vec::new()).map(|(_, random_recv)| random_recv)
+                .sendless_boxed()
+        });
+        task0.join(task1).map(|(random_send, random_recv)| {
+            assert_eq!(random_send, random_recv);
+            if random_send != random_recv {
+                let mut send = unwrap!(File::create("one-way-failed-send.dat"));
+                let mut recv = unwrap!(File::create("one-way-failed-recv.dat"));
+                unwrap!(send.write_all(&random_send));
+                unwrap!(recv.write_all(&random_recv));
+                panic!("Data corrupted during one way transfer! Sent/received data saved to one-way-failed-send.dat and one-way-failed-recv.dat");
+            }
+        }).sendless_boxed()
+    }));
+    unwrap!(res);
 }
 
