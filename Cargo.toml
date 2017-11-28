@@ -1,13 +1,11 @@
 [package]
 name = "tokio-utp"
 version = "0.1.0"
-authors = ["Carl Lerche <me@carllerche.com>"]
+authors = ["Carl Lerche <me@carllerche.com>", "Andrew Cann <shum@canndrew.org>"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/carllerche/utp"
 documentation = "https://docs.rs/utp2/0.1"
-description = """
-Non-blocking, Mio compatible, UTP implementation.
-"""
+description = "tokio-based uTP implementation"
 
 [dependencies]
 mio = "0.6.9"
