@@ -53,14 +53,14 @@ pub fn rand<T: ::rand::Rand>() -> T {
 }
 
 #[cfg(test)]
-pub use self::test::{rand, reset_rand};
+pub use self::test::{rand, reset_rand, THREAD_RNG};
 
 #[cfg(test)]
 mod test {
     use rand::{Rand, XorShiftRng, Rng};
     use std::cell::RefCell;
 
-    thread_local!(static THREAD_RNG: RefCell<XorShiftRng> = {
+    thread_local!(pub static THREAD_RNG: RefCell<XorShiftRng> = {
         RefCell::new(XorShiftRng::new_unseeded())
     });
 

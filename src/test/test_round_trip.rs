@@ -8,8 +8,8 @@ use tokio_io;
 use tokio_io::AsyncRead;
 use futures::future;
 use futures::{Future, Stream};
-use rand;
 use rand::Rng;
+use util;
 
 trait FutureExt: Sized + Future + 'static {
     fn sendless_boxed(self) -> Box<Future<Item=Self::Item, Error=Self::Error> + 'static> {
@@ -24,12 +24,13 @@ fn send_lots_of_data_one_way() {
     const NUM_TESTS: usize = 100;
 
     let _ = ::env_logger::init();
+    util::reset_rand();
 
     send_data_one_way(0);
     send_data_one_way(1);
     for i in 0..NUM_TESTS {
         info!("Test {} of {}", i + 1, NUM_TESTS);
-        let num_bytes = rand::thread_rng().gen_range(1024 * 1024, 1024 * 1024 * 20);
+        let num_bytes = util::THREAD_RNG.with(|r| r.borrow_mut().gen_range(1024 * 1024, 1024 * 1024 * 20));
         send_data_one_way(num_bytes);
     }
 }
@@ -39,13 +40,13 @@ fn send_lots_of_data_round_trip() {
     const NUM_TESTS: usize = 100;
 
     let _ = ::env_logger::init();
+    util::reset_rand();
 
     send_data_round_trip(0);
     send_data_round_trip(1);
     for i in 0..NUM_TESTS {
         info!("Test {} of {}", i + 1, NUM_TESTS);
-        let num_bytes = rand::thread_rng().gen_range(1024 * 1024, 1024 * 1024 * 20);
-        //let num_bytes = rand::thread_rng().gen_range(1024, 1024 * 1024 * 20);
+        let num_bytes = util::THREAD_RNG.with(|r| r.borrow_mut().gen_range(1024 * 1024, 1024 * 1024 * 20));
         send_data_round_trip(num_bytes);
     }
 }
@@ -56,7 +57,7 @@ fn send_data_round_trip(num_bytes: usize) {
     let random_send = {
         let mut random_send = Vec::with_capacity(num_bytes);
         unsafe { random_send.set_len(num_bytes) };
-        rand::thread_rng().fill_bytes(&mut random_send[..]);
+        util::THREAD_RNG.with(|r| r.borrow_mut().fill_bytes(&mut random_send[..]));
         random_send
     };
 
@@ -110,7 +111,7 @@ fn send_data_one_way(num_bytes: usize) {
     let random_send = {
         let mut random_send = Vec::with_capacity(num_bytes);
         unsafe { random_send.set_len(num_bytes) };
-        rand::thread_rng().fill_bytes(&mut random_send[..]);
+        util::THREAD_RNG.with(|r| r.borrow_mut().fill_bytes(&mut random_send[..]));
         random_send
     };
 
