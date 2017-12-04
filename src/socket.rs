@@ -23,13 +23,14 @@ use std::net::SocketAddr;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// A uTP socket. Can be used to make outgoing connections.
 pub struct UtpSocket {
     // Shared state
     inner: InnerCell,
     req_finalize: oneshot::Sender<oneshot::Sender<()>>,
 }
 
-/// Manages the state for a single UTP connection
+/// A uTP stream.
 pub struct UtpStream {
     // Shared state
     inner: InnerCell,
@@ -41,6 +42,7 @@ pub struct UtpStream {
     registration: PollEvented<Registration>,
 }
 
+/// Listens for incoming uTP connections.
 pub struct UtpListener {
     // Shared state
     inner: InnerCell,
@@ -163,6 +165,7 @@ enum State {
 }
 
 type InnerCell = Rc<RefCell<Inner>>;
+/// Can be applied to a `UtpSocket` using `set_filter` to help filter out bogus UDP packets.
 pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut>>;
 
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
@@ -183,6 +186,7 @@ impl UtpSocket {
         UdpSocket::bind(addr, handle).and_then(|s| UtpSocket::from_socket(s, handle))
     }
 
+    /// Gets the local address that the socket is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.borrow().shared.socket.local_addr()
     }
@@ -252,6 +256,8 @@ impl UtpSocket {
     }
     */
 
+    /// Consume the socket and the convert it to a future which resolves once all connections have
+    /// been closed gracefully.
     pub fn finalize(self) -> UtpSocketFinalize {
         let (respond_tx, respond_rx) = oneshot::channel();
         unwrap!(self.req_finalize.send(respond_tx));
@@ -260,6 +266,9 @@ impl UtpSocket {
         }
     }
 
+    /// Set the filter which filters out bogus UDP packets. Can be used to filter (eg.) STUN
+    /// packets that are expected to arrive on the port. Returns the previously-set filter (if
+    /// any).
     pub fn set_filter(&self, filter: Option<Filter>) -> Option<Filter> {
         mem::replace(&mut self.inner.borrow_mut().filter, filter)
     }
@@ -286,6 +295,7 @@ impl Evented for UtpSocket {
 */
 
 impl UtpListener {
+    /// Get the local address that the listener is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.borrow().shared.socket.local_addr()
     }
@@ -309,6 +319,7 @@ impl UtpListener {
         }
     }
 
+    /// Convert the `UtpListener` to a stream of incoming connections.
     pub fn incoming(self) -> Incoming {
         Incoming {
             listener: self,
@@ -355,17 +366,20 @@ impl Evented for UtpListener {
 */
 
 impl UtpStream {
+    /// Get the address of the remote peer.
     pub fn peer_addr(&self) -> SocketAddr {
         let inner = self.inner.borrow();
         let connection = &inner.connections[self.token];
         connection.key.addr
     }
 
+    /// Get the local address that the stream is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         let inner = self.inner.borrow();
         inner.shared.socket.local_addr()
     }
 
+    /// The same as `Read::read` except it does not require a mutable reference to the stream.
     pub fn read_immutable(&self, dst: &mut [u8]) -> io::Result<usize> {
         if let Async::NotReady = self.registration.poll_read() {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -393,6 +407,7 @@ impl UtpStream {
         }
     }
 
+    /// The same as `Write::write` except it does not require a mutable reference to the stream.
     pub fn write_immutable(&self, src: &[u8]) -> io::Result<usize> {
         if let Async::NotReady = self.registration.poll_write() {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -407,11 +422,15 @@ impl UtpStream {
         }
     }
 
+    /// Shutdown the write-side of the uTP connection. The stream can still be used to read data
+    /// received from the peer but can no longer be used to send data. Will cause the peer to
+    /// receive and EOF.
     pub fn shutdown_write(&self) -> io::Result<()> {
         self.inner.borrow_mut().shutdown_write(self.token)
     }
 
-    // Returns Ok(()) if all outgoing data has been written.
+    /// Flush all outgoing data on the socket. Returns `Err(WouldBlock)` if there remains data that
+    /// could not be immediately written.
     pub fn flush_immutable(&self) -> io::Result<()> {
         if !self.inner.borrow_mut().flush(self.token)? {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -419,6 +438,8 @@ impl UtpStream {
         Ok(())
     }
 
+    /// Sets how long we must lose contact with the remote peer for before we consider the
+    /// connection to have died. Defaults to 1 minute.
     pub fn set_disconnect_timeout(&self, duration: Duration) {
         let mut inner = self.inner.borrow_mut();
         let mut connection = &mut inner.connections[self.token];
@@ -1290,6 +1311,7 @@ impl Key {
     }
 }
 
+/// A future that resolves with the connected `UtpStream`.
 pub struct UtpStreamConnect {
     state: UtpStreamConnectState,
 }
@@ -1367,7 +1389,7 @@ impl SocketRefresher {
     }
 }
 
-
+/// A future that resolves once the socket has been finalised. Created via `UtpSocket::finalize`.
 pub struct UtpSocketFinalize {
     resp_finalize: oneshot::Receiver<()>,
 }
@@ -1384,6 +1406,7 @@ impl Future for UtpSocketFinalize {
     }
 }
 
+/// A stream of incoming uTP connections. Created via `UtpListener::incoming`.
 pub struct Incoming {
     listener: UtpListener,
 }
