@@ -355,6 +355,12 @@ impl Evented for UtpListener {
 */
 
 impl UtpStream {
+    pub fn peer_addr(&self) -> SocketAddr {
+        let inner = self.inner.borrow();
+        let connection = &inner.connections[self.token];
+        connection.key.addr
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         let inner = self.inner.borrow();
         inner.shared.socket.local_addr()
