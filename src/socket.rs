@@ -664,6 +664,9 @@ impl Inner {
                     trace!("ready -> would block");
                     break;
                 }
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                    continue;
+                }
                 Err(e) => {
                     trace!("recv_from; error={:?}", e);
                     return Err(e);
