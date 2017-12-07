@@ -6,7 +6,7 @@ use packet::{self, Packet};
 
 //use mio::net::UdpSocket;
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Timeout, Handle, PollEvented};
+use tokio_core::reactor::{Timeout, Handle, Remote, PollEvented};
 use tokio_io::{AsyncRead, AsyncWrite};
 use mio::{Registration, SetReadiness, Ready};
 use futures::{Async, Future, Stream};
@@ -57,7 +57,7 @@ struct Inner {
     shared: Shared,
 
     // Handle to the event loop.
-    handle: Handle,
+    remote: Remote,
 
     // Connection specific state
     connections: Slab<Connection>,
@@ -76,6 +76,8 @@ struct Inner {
 
     filter: Option<Filter>,
 }
+
+unsafe impl Send for Inner {}
 
 struct Shared {
     // The UDP socket backing everything!
@@ -165,7 +167,7 @@ enum State {
 
 type InnerCell = Arc<RwLock<Inner>>;
 /// Can be applied to a `UtpSocket` using `set_filter` to help filter out bogus UDP packets.
-pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut>>;
+pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut> + Sync>;
 
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
@@ -200,7 +202,7 @@ impl UtpSocket {
                 socket: socket,
                 ready: Ready::empty(),
             },
-            handle: handle.clone(),
+            remote: handle.remote().clone(),
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
             in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
@@ -578,8 +580,9 @@ impl Inner {
         // Queue the syn packet
         out_queue.push(packet);
 
+        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
         let (registration, set_readiness) = Registration::new2();
-        let registration = PollEvented::new(registration, &self.handle)?;
+        let registration = PollEvented::new(registration, &handle)?;
         let now = Instant::now();
 
         let mut connection = Connection {
@@ -787,8 +790,9 @@ impl Inner {
             return Ok(());
         }
 
+        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
         let (registration, set_readiness) = Registration::new2();
-        let registration = PollEvented::new(registration, &self.handle)?;
+        let registration = PollEvented::new(registration, &handle)?;
 
         let now = Instant::now();
 
