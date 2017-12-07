@@ -17,8 +17,7 @@ use bytes::{BytesMut, BufMut};
 use slab::Slab;
 
 use std::{cmp, io, mem, u32};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::net::SocketAddr;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -164,7 +163,7 @@ enum State {
     Reset,
 }
 
-type InnerCell = Rc<RefCell<Inner>>;
+type InnerCell = Arc<RwLock<Inner>>;
 /// Can be applied to a `UtpSocket` using `set_filter` to help filter out bogus UDP packets.
 pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut>>;
 
@@ -188,7 +187,7 @@ impl UtpSocket {
 
     /// Gets the local address that the socket is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.borrow().shared.socket.local_addr()
+        unwrap!(self.inner.read()).shared.socket.local_addr()
     }
 
     /// Create a new `Utpsocket` backed by the provided `UdpSocket`.
@@ -196,7 +195,7 @@ impl UtpSocket {
         let (listener_registration, listener_set_readiness) = Registration::new2();
         let (finalize_tx, finalize_rx) = oneshot::channel();
 
-        let inner = Rc::new(RefCell::new(Inner {
+        let inner = Arc::new(RwLock::new(Inner {
             shared: Shared {
                 socket: socket,
                 ready: Ready::empty(),
@@ -236,7 +235,7 @@ impl UtpSocket {
 
     /// Connect a new `UtpSocket` to the given remote socket address
     pub fn connect(&self, addr: &SocketAddr) -> UtpStreamConnect {
-        let state = match self.inner.borrow_mut().connect(addr, &self.inner) {
+        let state = match unwrap!(self.inner.write()).connect(addr, &self.inner) {
             Ok(stream) => UtpStreamConnectState::Waiting(stream),
             Err(e) => UtpStreamConnectState::Err(e),
         };
@@ -247,12 +246,12 @@ impl UtpSocket {
     /// Called whenever the socket readiness changes
     /// Returns true if all connections have been finalised.
     pub fn ready(&self, ready: Ready) -> io::Result<bool> {
-        self.inner.borrow_mut().ready(ready, &self.inner)
+        unwrap!(self.inner.write()).ready(ready, &self.inner)
     }
 
     /// This function should be called every 500ms
     pub fn tick(&self) -> io::Result<()> {
-        self.inner.borrow_mut().tick()
+        unwrap!(self.inner.write()).tick()
     }
     */
 
@@ -270,7 +269,7 @@ impl UtpSocket {
     /// packets that are expected to arrive on the port. Returns the previously-set filter (if
     /// any).
     pub fn set_filter(&self, filter: Option<Filter>) -> Option<Filter> {
-        mem::replace(&mut self.inner.borrow_mut().filter, filter)
+        mem::replace(&mut unwrap!(self.inner.write()).filter, filter)
     }
 }
 
@@ -279,17 +278,17 @@ impl Evented for UtpSocket {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
         -> io::Result<()>
     {
-        self.inner.borrow_mut().shared.socket.register(poll, token, interest, opts)
+        unwrap!(self.inner.write()).shared.socket.register(poll, token, interest, opts)
     }
 
     fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt)
         -> io::Result<()>
     {
-        self.inner.borrow_mut().shared.socket.reregister(poll, token, interest, opts)
+        unwrap!(self.inner.write()).shared.socket.reregister(poll, token, interest, opts)
     }
 
     fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        self.inner.borrow_mut().shared.socket.deregister(poll)
+        unwrap!(self.inner.write()).shared.socket.deregister(poll)
     }
 }
 */
@@ -297,7 +296,7 @@ impl Evented for UtpSocket {
 impl UtpListener {
     /// Get the local address that the listener is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.borrow().shared.socket.local_addr()
+        unwrap!(self.inner.read()).shared.socket.local_addr()
     }
 
     /// Receive a new inbound connection.
@@ -308,7 +307,7 @@ impl UtpListener {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
-        match self.inner.borrow_mut().accept() {
+        match unwrap!(self.inner.write()).accept() {
             Err(e) => {
                 if e.kind() == io::ErrorKind::WouldBlock {
                     self.registration.need_read();
@@ -329,7 +328,7 @@ impl UtpListener {
 
 impl Drop for UtpListener {
     fn drop(&mut self) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = unwrap!(self.inner.write());
         inner.listener_open = false;
 
         // Empty the connection queue
@@ -340,7 +339,7 @@ impl Drop for UtpListener {
 #[cfg(test)]
 impl UtpListener {
     pub fn is_readable(&self) -> bool {
-        let inner = self.inner.borrow();
+        let inner = unwrap!(self.inner.read());
         inner.listener.readiness().is_readable()
     }
 }
@@ -368,14 +367,14 @@ impl Evented for UtpListener {
 impl UtpStream {
     /// Get the address of the remote peer.
     pub fn peer_addr(&self) -> SocketAddr {
-        let inner = self.inner.borrow();
+        let inner = unwrap!(self.inner.read());
         let connection = &inner.connections[self.token];
         connection.key.addr
     }
 
     /// Get the local address that the stream is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        let inner = self.inner.borrow();
+        let inner = unwrap!(self.inner.read());
         inner.shared.socket.local_addr()
     }
 
@@ -385,7 +384,7 @@ impl UtpStream {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = unwrap!(self.inner.write());
         let connection = &mut inner.connections[self.token];
 
         match connection.in_queue.read(dst) {
@@ -413,7 +412,7 @@ impl UtpStream {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
-        match self.inner.borrow_mut().write(self.token, src) {
+        match unwrap!(self.inner.write()).write(self.token, src) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 self.registration.need_write();
                 Err(io::ErrorKind::WouldBlock.into())
@@ -426,13 +425,13 @@ impl UtpStream {
     /// received from the peer but can no longer be used to send data. Will cause the peer to
     /// receive and EOF.
     pub fn shutdown_write(&self) -> io::Result<()> {
-        self.inner.borrow_mut().shutdown_write(self.token)
+        unwrap!(self.inner.write()).shutdown_write(self.token)
     }
 
     /// Flush all outgoing data on the socket. Returns `Err(WouldBlock)` if there remains data that
     /// could not be immediately written.
     pub fn flush_immutable(&self) -> io::Result<()> {
-        if !self.inner.borrow_mut().flush(self.token)? {
+        if !unwrap!(self.inner.write()).flush(self.token)? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         Ok(())
@@ -441,7 +440,7 @@ impl UtpStream {
     /// Sets how long we must lose contact with the remote peer for before we consider the
     /// connection to have died. Defaults to 1 minute.
     pub fn set_disconnect_timeout(&self, duration: Duration) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = unwrap!(self.inner.write());
         let mut connection = &mut inner.connections[self.token];
         connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
     }
@@ -450,19 +449,19 @@ impl UtpStream {
 #[cfg(test)]
 impl UtpStream {
     pub fn is_readable(&self) -> bool {
-        let inner = self.inner.borrow();
+        let inner = unwrap!(self.inner.read());
         let connection = &inner.connections[self.token];
         connection.set_readiness.readiness().is_readable()
     }
 
     pub fn is_writable(&self) -> bool {
-        let inner = self.inner.borrow();
+        let inner = unwrap!(self.inner.read());
         let connection = &inner.connections[self.token];
         connection.set_readiness.readiness().is_writable()
     }
 
     pub fn set_loss_rate(&self, rate: f32) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = unwrap!(self.inner.write());
         let connection = &mut inner.connections[self.token];
         connection.loss_rate = (rate as f64 * ::std::u32::MAX as f64) as u32;
     }
@@ -470,7 +469,7 @@ impl UtpStream {
 
 impl Drop for UtpStream {
     fn drop(&mut self) {
-        self.inner.borrow_mut().close(self.token);
+        unwrap!(self.inner.write()).close(self.token);
     }
 }
 
@@ -1372,7 +1371,7 @@ impl SocketRefresher {
         loop {
             match self.timeout.poll()? {
                 Async::Ready(()) => {
-                    self.inner.borrow_mut().tick()?;
+                    unwrap!(self.inner.write()).tick()?;
                     self.next_tick += Duration::from_millis(500);
                     self.timeout.reset(self.next_tick);
                 },
@@ -1380,8 +1379,8 @@ impl SocketRefresher {
             }
         }
 
-        if let Async::Ready(true) = self.inner.borrow_mut().refresh(&self.inner)? {
-            if 1 == Rc::strong_count(&self.inner) {
+        if let Async::Ready(true) = unwrap!(self.inner.write()).refresh(&self.inner)? {
+            if 1 == Arc::strong_count(&self.inner) {
                 if let Ok(Async::Ready(resp_finalize)) = self.req_finalize.poll() {
                     let _ = resp_finalize.send(());
                 }
