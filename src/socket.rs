@@ -491,11 +491,13 @@ impl UtpStream {
     */
 }
 
+/*
 impl Drop for UtpStream {
     fn drop(&mut self) {
         unwrap!(self.inner.write()).close(self.token);
     }
 }
+*/
 
 /*
 impl Evented for UtpStream {
