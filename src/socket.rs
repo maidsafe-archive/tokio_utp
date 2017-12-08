@@ -491,13 +491,11 @@ impl UtpStream {
     */
 }
 
-/*
 impl Drop for UtpStream {
     fn drop(&mut self) {
         unwrap!(self.inner.write()).close(self.token);
     }
 }
-*/
 
 /*
 impl Evented for UtpStream {
@@ -666,7 +664,7 @@ impl Inner {
             if !conn.state.is_closed() {
                 conn.out_queue.push(Packet::fin());
                 conn.state = State::FinSent;
-                let _ = conn.flush(&mut self.shared);
+                //let _ = conn.flush(&mut self.shared);
             }
             conn.is_finalized()
         };
