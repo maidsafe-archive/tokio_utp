@@ -16,7 +16,7 @@ use void::Void;
 use bytes::{BytesMut, BufMut};
 use slab::Slab;
 
-use std::{cmp, io, mem, u32};
+use std::{cmp, io, mem, u32, fmt};
 use std::sync::{Arc, RwLock};
 use std::net::SocketAddr;
 use std::collections::{HashMap, VecDeque};
@@ -27,6 +27,12 @@ pub struct UtpSocket {
     // Shared state
     inner: InnerCell,
     req_finalize: oneshot::Sender<oneshot::Sender<()>>,
+}
+
+impl fmt::Debug for UtpSocket {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "UtpSocket")
+    }
 }
 
 /// A uTP stream.
@@ -41,6 +47,14 @@ pub struct UtpStream {
     registration: PollEvented<Registration>,
 }
 
+impl fmt::Debug for UtpStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.debug_struct("UtpStream")
+            .field("peer_addr", &self.peer_addr())
+            .finish()
+    }
+}
+
 /// Listens for incoming uTP connections.
 pub struct UtpListener {
     // Shared state
@@ -48,6 +62,12 @@ pub struct UtpListener {
 
     // Used to register interest in accepting UTP sockets
     registration: PollEvented<Registration>,
+}
+
+impl fmt::Debug for UtpListener {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "UtpListener")
+    }
 }
 
 // Shared between the UtpSocket and each UtpStream
