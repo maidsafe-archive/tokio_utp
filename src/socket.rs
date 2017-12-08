@@ -158,8 +158,8 @@ struct Connection {
 
     // Artifical packet loss rate (for testing)
     // Probability of dropping is loss_rate / u32::MAX
-    #[cfg(test)]
-    loss_rate: u32,
+    //#[cfg(test)]
+    //loss_rate: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -482,11 +482,13 @@ impl UtpStream {
         connection.set_readiness.readiness().is_writable()
     }
 
+    /*
     pub fn set_loss_rate(&self, rate: f32) {
         let mut inner = unwrap!(self.inner.write());
         let connection = &mut inner.connections[self.token];
         connection.loss_rate = (rate as f64 * ::std::u32::MAX as f64) as u32;
     }
+    */
 }
 
 impl Drop for UtpStream {
@@ -627,8 +629,8 @@ impl Inner {
             average_sample_time: now,
             clock_drift: 0,
             slow_start: true,
-            #[cfg(test)]
-            loss_rate: 0,
+            //#[cfg(test)]
+            //loss_rate: 0,
         };
 
         connection.flush(&mut self.shared)?;
@@ -838,8 +840,8 @@ impl Inner {
             average_sample_time: now,
             clock_drift: 0,
             slow_start: true,
-            #[cfg(test)]
-            loss_rate: 0,
+            //#[cfg(test)]
+            //loss_rate: 0,
         };
 
         // This will handle the state packet being sent
@@ -1047,9 +1049,9 @@ impl Connection {
             trace!("send_to; addr={:?}; packet={:?}", self.key.addr, next.packet());
 
             // We randomly drop packets when testing.
-            #[cfg(test)]
-            let drop_packet = self.loss_rate >= util::rand();
-            #[cfg(not(test))]
+            //#[cfg(test)]
+            //let drop_packet = self.loss_rate >= util::rand();
+            //#[cfg(not(test))]
             let drop_packet = false;
 
             if drop_packet {
