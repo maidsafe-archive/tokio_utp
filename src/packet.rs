@@ -50,6 +50,10 @@ const VERSION_MASK: u8 = 0b1111;
 
 impl Packet {
     pub fn parse(packet: BytesMut) -> io::Result<Packet> {
+        if packet.len() < 20 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+
         let ret = Packet::new(0, packet);
 
         if ret.version() != 1 {
