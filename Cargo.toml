@@ -3,8 +3,8 @@ name = "tokio-utp"
 version = "0.2.7"
 authors = ["Carl Lerche <me@carllerche.com>", "Andrew Cann <shum@canndrew.org>"]
 license = "MIT/Apache-2.0"
-repository = "https://github.com/carllerche/utp"
-documentation = "https://docs.rs/utp2/0.1"
+repository = "https://github.com/canndrew/tokio-utp"
+documentation = "https://docs.rs/tokio-utp"
 description = "tokio-based uTP implementation"
 
 [dependencies]
