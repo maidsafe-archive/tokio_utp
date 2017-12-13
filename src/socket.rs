@@ -354,7 +354,14 @@ impl Drop for UtpListener {
         inner.listener_open = false;
 
         // Empty the connection queue
-        while let Ok(_) = inner.accept() {}
+        let mut streams = Vec::new();
+        while let Ok(stream) = inner.accept() {
+            streams.push(stream);
+        }
+
+        // Must release the lock before dropping the streams
+        drop(inner);
+        drop(streams);
     }
 }
 
