@@ -1184,7 +1184,7 @@ impl Connection {
                     } else if max_sample < 0 {
                         let adjust = -max_sample;
 
-                        self.average_delay_base -= adjust as u32;
+                        self.average_delay_base = self.average_delay_base.saturating_sub(adjust as u32);
                         self.average_delay += adjust;
                         prev_average_delay += adjust;
                     }
