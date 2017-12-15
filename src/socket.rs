@@ -9,11 +9,12 @@ use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Timeout, Handle, Remote, PollEvented};
 use tokio_io::{AsyncRead, AsyncWrite};
 use mio::{Registration, SetReadiness, Ready};
-use futures::{Async, Future, Stream};
+use futures::{Async, AsyncSink, Future, Stream, Sink};
 use futures::sync::oneshot;
-use void::Void;
+use future_utils::mpsc::{self, UnboundedSender, UnboundedReceiver};
+use void::{Void, ResultVoidExt};
 
-use bytes::{BytesMut, BufMut};
+use bytes::{Bytes, BytesMut, BufMut};
 use slab::Slab;
 
 use std::{cmp, io, mem, u32, fmt};
@@ -70,6 +71,17 @@ impl fmt::Debug for UtpListener {
     }
 }
 
+pub struct RawReceiver {
+    channel_rx: UnboundedReceiver<RawChannel>,
+}
+
+pub struct RawChannel {
+    inner: InnerCell,
+    peer_addr: SocketAddr,
+    bytes_rx: UnboundedReceiver<BytesMut>,
+    registration: PollEvented<Registration>,
+}
+
 // Shared between the UtpSocket and each UtpStream
 struct Inner {
     // State that needs to be passed to `Connection`. This is broken out to make
@@ -94,7 +106,10 @@ struct Inner {
 
     listener_open: bool,
 
-    filter: Option<Filter>,
+    raw_data_max: usize,
+    raw_data_buffered: usize,
+    raw_receiver: Option<UnboundedSender<RawChannel>>,
+    raw_channels: HashMap<SocketAddr, (UnboundedSender<BytesMut>, SetReadiness)>,
 }
 
 unsafe impl Send for Inner {}
@@ -186,9 +201,8 @@ enum State {
 }
 
 type InnerCell = Arc<RwLock<Inner>>;
-/// Can be applied to a `UtpSocket` using `set_filter` to help filter out bogus UDP packets.
-pub type Filter = Box<FnMut(BytesMut) -> Option<BytesMut> + Sync>;
 
+const DEFAULT_RAW_DATA_MAX: usize = 1_024 * 1_024;
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_CONNECTIONS_PER_SOCKET: usize = 2 * 1024;
@@ -229,7 +243,10 @@ impl UtpSocket {
             accept_buf: VecDeque::new(),
             listener: listener_set_readiness,
             listener_open: true,
-            filter: None,
+            raw_data_max: DEFAULT_RAW_DATA_MAX,
+            raw_data_buffered: 0,
+            raw_receiver: None,
+            raw_channels: HashMap::new(),
         }));
 
         let listener = UtpListener {
@@ -287,11 +304,102 @@ impl UtpSocket {
         }
     }
 
-    /// Set the filter which filters out bogus UDP packets. Can be used to filter (eg.) STUN
-    /// packets that are expected to arrive on the port. Returns the previously-set filter (if
-    /// any).
-    pub fn set_filter(&self, filter: Option<Filter>) -> Option<Filter> {
-        mem::replace(&mut unwrap!(self.inner.write()).filter, filter)
+    pub fn raw_receiver(&self) -> RawReceiver {
+        let (tx, rx) = mpsc::unbounded();
+        let ret = RawReceiver {
+            channel_rx: rx,
+        };
+        let mut inner = unwrap!(self.inner.write());
+        inner.raw_receiver = Some(tx);
+        ret
+    }
+
+    pub fn raw_channel(&self, addr: &SocketAddr) -> io::Result<RawChannel> {
+        let mut inner = unwrap!(self.inner.write());
+        inner.raw_channel(*addr, &self.inner, None)
+    }
+}
+
+impl Stream for RawReceiver {
+    type Item = RawChannel;
+    type Error = Void;
+
+    fn poll(&mut self) -> Result<Async<Option<RawChannel>>, Void> {
+        self.channel_rx.poll()
+    }
+}
+
+impl RawChannel {
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+}
+
+impl Drop for RawChannel {
+    fn drop(&mut self) {
+        let mut inner = unwrap!(self.inner.write());
+        loop {
+            match self.bytes_rx.poll().void_unwrap() {
+                Async::Ready(Some(bytes)) => {
+                    inner.raw_data_buffered -= bytes.len();
+                },
+                Async::Ready(None) => {
+                    break;
+                },
+                Async::NotReady => {
+                    // NOTE: we only de-register the channel if the sender is still alive
+                    // (indicating it is still registered with the Inner).
+                    let _ = inner.raw_channels.remove(&self.peer_addr);
+                    break;
+                },
+            }
+        }
+    }
+}
+
+impl Stream for RawChannel {
+    type Item = BytesMut;
+    type Error = Void;
+
+    fn poll(&mut self) -> Result<Async<Option<BytesMut>>, Void> {
+        let ret = self.bytes_rx.poll();
+        if let Ok(Async::Ready(Some(ref bytes))) = ret {
+            let mut inner = unwrap!(self.inner.write());
+            inner.raw_data_buffered -= bytes.len();
+        }
+        ret
+    }
+}
+
+impl Sink for RawChannel {
+    type SinkItem = Bytes;
+    type SinkError = io::Error;
+
+    fn start_send(&mut self, item: Bytes) -> io::Result<AsyncSink<Bytes>> {
+        match self.registration.poll_write() {
+            Async::NotReady => Ok(AsyncSink::NotReady(item)),
+            Async::Ready(()) => {
+                let res = {
+                    let inner = unwrap!(self.inner.read());
+                    inner.shared.socket.send_to(&item[..], &self.peer_addr)
+                };
+                match res {
+                    Ok(n) => {
+                        assert_eq!(n, item.len());
+                        Ok(AsyncSink::Ready)
+                    },
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        self.registration.need_write();
+                        Ok(AsyncSink::NotReady(item))
+                    },
+                    Err(e) => Err(e),
+                }
+            },
+        }
+    }
+
+    fn poll_complete(&mut self) -> io::Result<Async<()>> {
+        Ok(Async::Ready(()))
     }
 }
 
@@ -689,7 +797,7 @@ impl Inner {
 
         loop {
             // Try to receive a packet
-            let (packet, addr) = match self.recv_from() {
+            let (bytes, addr) = match self.recv_from() {
                 Ok(v) => v,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     trace!("ready -> would block");
@@ -704,9 +812,9 @@ impl Inner {
                 }
             };
 
-            trace!("recv_from; addr={:?}; packet={:?}", addr, packet);
+            //trace!("recv_from; addr={:?}; packet={:?}", addr, b);
 
-            match self.process(packet, addr, inner) {
+            match self.process(bytes, addr, inner) {
                 Ok(_) => {}
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     panic!("NOPE");
@@ -715,7 +823,12 @@ impl Inner {
             }
         }
 
-        let _ = self.flush_all()?;
+        let still_writable = self.flush_all()?;
+        if still_writable {
+            for &(_, ref set_readiness) in self.raw_channels.values() {
+                set_readiness.set_readiness(ready)?;
+            }
+        }
         Ok(self.connection_lookup.is_empty())
     }
 
@@ -744,10 +857,14 @@ impl Inner {
     }
 
     fn process(&mut self,
-               packet: Packet,
+               bytes: BytesMut,
                addr: SocketAddr,
                inner: &InnerCell) -> io::Result<()>
     {
+        let packet = match Packet::parse(bytes) {
+            Ok(packet) => packet,
+            Err(bytes) => return self.process_raw(bytes, addr, inner),
+        };
         // Process the packet
         match packet.ty() {
             packet::Type::Syn => {
@@ -773,15 +890,15 @@ impl Inner {
                         Ok(())
                     }
                     None => {
-                        trace!("no connection associated with ID; dropping packet");
+                        trace!("no connection associated with ID; treating as raw data");
 
-                        // Send the RESET packet, ignoring errors...
+                        // Send a RESET packet, ignoring errors...
                         let mut p = Packet::reset();
                         p.set_connection_id(packet.connection_id());
 
                         let _ = self.shared.socket.send_to(p.as_slice(), &addr);
 
-                        return Ok(());
+                        self.process_raw(packet.into_bytes(), addr, inner)
                     }
                 }
             }
@@ -870,7 +987,54 @@ impl Inner {
         return Ok(());
     }
 
-    fn recv_from(&mut self) -> io::Result<(Packet, SocketAddr)> {
+    fn process_raw(&mut self,
+                   bytes: BytesMut,
+                   addr: SocketAddr,
+                   inner: &InnerCell) -> io::Result<()>
+    {
+        if self.raw_data_buffered + bytes.len() > self.raw_data_max {
+            return Ok(());
+        }
+        self.raw_data_buffered += bytes.len();
+
+        if let Some(&(ref channel, _)) = self.raw_channels.get(&addr) {
+            let _ = channel.unbounded_send(bytes);
+            return Ok(());
+        }
+
+        if self.raw_receiver.is_some() {
+            let channel = self.raw_channel(addr, inner, Some(bytes))?;
+            if unwrap!(self.raw_receiver.as_ref()).unbounded_send(channel).is_err() {
+                self.raw_receiver = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn raw_channel(&mut self,
+                   addr: SocketAddr,
+                   inner: &InnerCell,
+                   data: Option<BytesMut>) -> io::Result<RawChannel>
+    {
+        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
+        let (registration, set_readiness) = Registration::new2();
+        let registration = PollEvented::new(registration, &handle)?;
+        let (tx, rx) = mpsc::unbounded();
+        if let Some(data) = data {
+            let _ = tx.unbounded_send(data);
+        }
+        let ret = RawChannel {
+            inner: inner.clone(),
+            peer_addr: addr,
+            bytes_rx: rx,
+            registration: registration,
+        };
+        let _ = self.raw_channels.insert(addr, (tx, set_readiness));
+        Ok(ret)
+    }
+
+    fn recv_from(&mut self) -> io::Result<(BytesMut, SocketAddr)> {
         loop {
             // Ensure the buffer has at least 4kb of available space.
             self.in_buf.reserve(MIN_BUFFER_SIZE);
@@ -883,20 +1047,8 @@ impl Inner {
             };
 
             let bytes = self.in_buf.take();
-            let bytes = if let Some(ref mut filter) = self.filter {
-                if let Some(bytes) = filter(bytes) {
-                    bytes
-                } else {
-                    continue
-                }
-            } else {
-                bytes
-            };
 
-            // Try loading the header
-            let packet = Packet::parse(bytes)?;
-
-            return Ok((packet, addr));
+            return Ok((bytes, addr));
         }
     }
 

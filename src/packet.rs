@@ -2,7 +2,7 @@ use bytes::{BytesMut, BufMut};
 use byteorder::{ByteOrder, BigEndian};
 use smallvec::SmallVec;
 
-use std::{fmt, io};
+use std::fmt;
 
 /// Packet header
 ///
@@ -49,22 +49,26 @@ const DEFAULT: [u8; 26] = [
 const VERSION_MASK: u8 = 0b1111;
 
 impl Packet {
-    pub fn parse(packet: BytesMut) -> io::Result<Packet> {
-        if packet.len() < 20 {
-            return Err(io::ErrorKind::InvalidData.into());
+    pub fn parse(bytes: BytesMut) -> Result<Packet, BytesMut> {
+        if bytes.len() < 20 {
+            return Err(bytes);
         }
 
-        let ret = Packet::new(0, packet);
+        let ret = Packet::new(0, bytes);
 
         if ret.version() != 1 {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid packet version"));
+            return Err(ret.into_bytes());
         }
 
         if ret.ty_raw() >= 5 {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid packet type"));
+            return Err(ret.into_bytes());
         }
 
         Ok(ret)
+    }
+
+    pub fn into_bytes(self) -> BytesMut {
+        self.data
     }
 
     pub fn new(padding: usize, packet: BytesMut) -> Packet {

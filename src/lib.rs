@@ -8,6 +8,7 @@ extern crate tokio_core;
 extern crate futures;
 extern crate void;
 extern crate tokio_io;
+extern crate future_utils;
 
 #[macro_use]
 extern crate log;
@@ -27,7 +28,7 @@ extern crate env_logger;
 #[cfg(test)]
 mod test;
 
-pub use socket::{UtpSocket, UtpStream, UtpListener, UtpSocketFinalize, UtpStreamConnect, Incoming, Filter};
+pub use socket::{UtpSocket, UtpStream, UtpListener, UtpSocketFinalize, UtpStreamConnect, Incoming};
 
 // max window size
 const MAX_WINDOW_SIZE: usize = 64 * 1_024;
