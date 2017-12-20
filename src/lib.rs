@@ -28,7 +28,7 @@ extern crate env_logger;
 #[cfg(test)]
 mod test;
 
-pub use socket::{UtpSocket, UtpStream, UtpListener, UtpSocketFinalize, UtpStreamConnect, Incoming};
+pub use socket::{UtpSocket, UtpStream, UtpListener, UtpSocketFinalize, UtpStreamConnect, Incoming, RawReceiver, RawChannel};
 
 // max window size
 const MAX_WINDOW_SIZE: usize = 64 * 1_024;
