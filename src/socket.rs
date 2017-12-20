@@ -72,6 +72,7 @@ impl fmt::Debug for UtpListener {
 }
 
 pub struct RawReceiver {
+    inner: InnerCell,
     channel_rx: UnboundedReceiver<RawChannel>,
 }
 
@@ -307,6 +308,7 @@ impl UtpSocket {
     pub fn raw_receiver(&self) -> RawReceiver {
         let (tx, rx) = mpsc::unbounded();
         let ret = RawReceiver {
+            inner: self.inner.clone(),
             channel_rx: rx,
         };
         let mut inner = unwrap!(self.inner.write());
@@ -326,6 +328,33 @@ impl Stream for RawReceiver {
 
     fn poll(&mut self) -> Result<Async<Option<RawChannel>>, Void> {
         self.channel_rx.poll()
+    }
+}
+
+impl Drop for RawReceiver {
+    fn drop(&mut self) {
+        let mut inner = unwrap!(self.inner.write());
+        let mut channels = Vec::new();
+        loop {
+            match self.channel_rx.poll().void_unwrap() {
+                Async::Ready(Some(raw_channel)) => {
+                    channels.push(raw_channel);
+                },
+                Async::Ready(None) => {
+                    break;
+                },
+                Async::NotReady => {
+                    // NOTE: we only de-register the channel if the sender is still alive
+                    // (indicating it is still registered with the Inner).
+                    inner.raw_receiver = None;
+                    break;
+                },
+            }
+        }
+
+        // NOTE: Must drop inner first to avoid deadlocking
+        drop(inner);
+        drop(channels);
     }
 }
 
@@ -578,7 +607,7 @@ impl UtpStream {
     /// connection to have died. Defaults to 1 minute.
     pub fn set_disconnect_timeout(&self, duration: Duration) {
         let mut inner = unwrap!(self.inner.write());
-        let mut connection = &mut inner.connections[self.token];
+        let connection = &mut inner.connections[self.token];
         connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
     }
 }
@@ -1004,9 +1033,7 @@ impl Inner {
 
         if self.raw_receiver.is_some() {
             let channel = self.raw_channel(addr, inner, Some(bytes))?;
-            if unwrap!(self.raw_receiver.as_ref()).unbounded_send(channel).is_err() {
-                self.raw_receiver = None;
-            }
+            unwrap!(unwrap!(self.raw_receiver.as_ref()).unbounded_send(channel));
         }
 
         Ok(())
