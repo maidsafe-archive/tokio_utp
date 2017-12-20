@@ -12,7 +12,7 @@ use mio::{Registration, SetReadiness, Ready};
 use futures::{Async, AsyncSink, Future, Stream, Sink};
 use futures::sync::oneshot;
 use future_utils::mpsc::{self, UnboundedSender, UnboundedReceiver};
-use void::{Void, ResultVoidExt};
+use void::Void;
 
 use bytes::{Bytes, BytesMut, BufMut};
 use slab::Slab;
@@ -312,6 +312,8 @@ impl UtpSocket {
             channel_rx: rx,
         };
         let mut inner = unwrap!(self.inner.write());
+        // NOTE: See the comments in RawReceiver::drop about removing this restriction
+        assert!(inner.raw_receiver.is_none(), "cannot have two raw receivers simultaneously");
         inner.raw_receiver = Some(tx);
         ret
     }
@@ -334,6 +336,9 @@ impl Stream for RawReceiver {
 impl Drop for RawReceiver {
     fn drop(&mut self) {
         let mut inner = unwrap!(self.inner.write());
+        /*
+         *  for this logic to work we need a way to drain an UnboundedReceiver from outsute a Task
+         *
         let mut channels = Vec::new();
         loop {
             match self.channel_rx.poll().void_unwrap() {
@@ -351,10 +356,14 @@ impl Drop for RawReceiver {
                 },
             }
         }
-
         // NOTE: Must drop inner first to avoid deadlocking
         drop(inner);
         drop(channels);
+
+        */
+
+        // for now, assume we are the only RawReciever
+        inner.raw_receiver = None;
     }
 }
 
@@ -367,6 +376,9 @@ impl RawChannel {
 impl Drop for RawChannel {
     fn drop(&mut self) {
         let mut inner = unwrap!(self.inner.write());
+        /*
+         * Similarly to RawReceiver, we need a .pop() method on bytes_rx before we can implement
+         * this. Otherwise it can crash when dropped outside of a task.
         loop {
             match self.bytes_rx.poll().void_unwrap() {
                 Async::Ready(Some(bytes)) => {
@@ -383,6 +395,10 @@ impl Drop for RawChannel {
                 },
             }
         }
+        */
+
+        // For now, assume we are the only raw_channel for this address
+        let _ = inner.raw_channels.remove(&self.peer_addr);
     }
 }
 
@@ -1057,7 +1073,8 @@ impl Inner {
             bytes_rx: rx,
             registration: registration,
         };
-        let _ = self.raw_channels.insert(addr, (tx, set_readiness));
+        // NOTE: See the comments in RawChannel::drop about removing this restriction
+        assert!(self.raw_channels.insert(addr, (tx, set_readiness)).is_none(), "already have a raw channel for this address");
         Ok(ret)
     }
 
