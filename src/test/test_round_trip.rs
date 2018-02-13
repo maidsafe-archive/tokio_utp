@@ -1,6 +1,4 @@
 use UtpSocket;
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::fs::File;
 use std::io::Write;
 use tokio_core::reactor::Core;
@@ -54,14 +52,8 @@ fn send_lots_of_data_round_trip() {
 fn send_data_round_trip(num_bytes: usize) {
     println!("== sending {} bytes", num_bytes);
 
-    let random_send = {
-        let mut random_send = Vec::with_capacity(num_bytes);
-        unsafe { random_send.set_len(num_bytes) };
-        util::THREAD_RNG.with(|r| r.borrow_mut().fill_bytes(&mut random_send[..]));
-        random_send
-    };
-
-    let addr = unwrap!(SocketAddr::from_str("127.0.0.1:0"));
+    let random_send = util::random_vec(num_bytes);
+    let addr = addr!("127.0.0.1:0");
     
     let mut core = unwrap!(Core::new());
     let handle = core.handle();
@@ -108,14 +100,8 @@ fn send_data_round_trip(num_bytes: usize) {
 }
 
 fn send_data_one_way(num_bytes: usize) {
-    let random_send = {
-        let mut random_send = Vec::with_capacity(num_bytes);
-        unsafe { random_send.set_len(num_bytes) };
-        util::THREAD_RNG.with(|r| r.borrow_mut().fill_bytes(&mut random_send[..]));
-        random_send
-    };
-
-    let addr = unwrap!(SocketAddr::from_str("127.0.0.1:0"));
+    let random_send = util::random_vec(num_bytes);
+    let addr = addr!("127.0.0.1:0");
     
     let mut core = unwrap!(Core::new());
     let handle = core.handle();
