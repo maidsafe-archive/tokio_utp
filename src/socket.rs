@@ -578,7 +578,7 @@ impl UtpStream {
     /// connection to have died. Defaults to 1 minute.
     pub fn set_disconnect_timeout(&self, duration: Duration) {
         let mut inner = unwrap!(self.inner.write());
-        let mut connection = &mut inner.connections[self.token];
+        let connection = &mut inner.connections[self.token];
         connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
     }
 }

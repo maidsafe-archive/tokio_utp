@@ -9,6 +9,9 @@ extern crate futures;
 extern crate void;
 extern crate tokio_io;
 extern crate future_utils;
+#[cfg(test)]
+#[macro_use]
+extern crate net_literals;
 
 #[macro_use]
 extern crate log;
@@ -24,6 +27,8 @@ mod util;
 
 #[cfg(test)]
 extern crate env_logger;
+#[cfg(test)]
+extern crate netsim;
 
 #[cfg(test)]
 mod test;
