@@ -67,6 +67,7 @@ impl Packet {
         Ok(ret)
     }
 
+    /// Don't try to parse returned bytes. Use `new()` instead with appropriate padding.
     pub fn into_bytes(self) -> BytesMut {
         self.data
     }
@@ -277,5 +278,36 @@ impl fmt::Debug for Packet {
             .field("ack_nr", &self.ack_nr())
             .field("payload", &self.payload().len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod packet {
+        use super::*;
+
+        #[test]
+        fn parse() {
+            let mut orig_packet = Packet::reset();
+            orig_packet.set_connection_id(12345);
+            orig_packet.set_timestamp(198765);
+            orig_packet.set_timestamp_diff(123);
+            orig_packet.set_wnd_size(65000);
+            orig_packet.set_seq_nr(100);
+            orig_packet.set_ack_nr(99);
+            let bytes = BytesMut::from(orig_packet.as_slice());
+
+            let packet = unwrap!(Packet::parse(bytes));
+
+            assert!(packet.connection_id() == 12345);
+            assert!(packet.timestamp() == 198765);
+            assert!(packet.timestamp_diff() == 123);
+            assert!(packet.wnd_size() == 65000);
+            assert!(packet.seq_nr() == 100);
+            assert!(packet.ack_nr() == 99);
+        }
+
     }
 }
