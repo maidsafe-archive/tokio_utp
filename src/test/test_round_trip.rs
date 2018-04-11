@@ -54,13 +54,13 @@ fn send_data_round_trip(num_bytes: usize) {
 
     let random_send = util::random_vec(num_bytes);
     let addr = addr!("127.0.0.1:0");
-    
+
     let mut core = unwrap!(Core::new());
     let handle = core.handle();
     let res = core.run(future::lazy(|| {
         let (socket_a, _) = unwrap!(UtpSocket::bind(&addr, &handle));
         let (_, listener_b) = unwrap!(UtpSocket::bind(&addr, &handle));
-        
+
         let task0 = socket_a.connect(&unwrap!(listener_b.local_addr())).and_then(|stream_a| {
             let (read_half_a, write_half_a) = stream_a.split();
             let task0 = tokio_io::io::write_all(write_half_a, random_send)
@@ -102,13 +102,13 @@ fn send_data_round_trip(num_bytes: usize) {
 fn send_data_one_way(num_bytes: usize) {
     let random_send = util::random_vec(num_bytes);
     let addr = addr!("127.0.0.1:0");
-    
+
     let mut core = unwrap!(Core::new());
     let handle = core.handle();
     let res = core.run(future::lazy(|| {
         let (socket_a, _) = unwrap!(UtpSocket::bind(&addr, &handle));
         let (_, listener_b) = unwrap!(UtpSocket::bind(&addr, &handle));
-        
+
         let task0 = socket_a.connect(&unwrap!(listener_b.local_addr())).and_then(|stream_a| {
             tokio_io::io::write_all(stream_a, random_send)
                 .and_then(|(stream_a, random_send)| {
