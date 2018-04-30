@@ -113,6 +113,38 @@ struct Inner {
     raw_channels: HashMap<SocketAddr, (UnboundedSender<BytesMut>, SetReadiness)>,
 }
 
+type InnerCell = Arc<RwLock<Inner>>;
+
+impl Inner {
+    fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
+        Inner {
+            shared: Shared {
+                socket: socket,
+                ready: Ready::empty(),
+            },
+            remote: handle.remote().clone(),
+            connections: Slab::new(),
+            connection_lookup: HashMap::new(),
+            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
+            accept_buf: VecDeque::new(),
+            listener: listener_set_readiness,
+            listener_open: true,
+            raw_data_max: DEFAULT_RAW_DATA_MAX,
+            raw_data_buffered: 0,
+            raw_receiver: None,
+            raw_channels: HashMap::new(),
+        }
+    }
+
+    fn new_shared(
+        handle: &Handle,
+        socket: UdpSocket,
+        listener_set_readiness: SetReadiness,
+    ) -> InnerCell {
+        Arc::new(RwLock::new(Inner::new(handle, socket, listener_set_readiness)))
+    }
+}
+
 unsafe impl Send for Inner {}
 
 struct Shared {
@@ -201,8 +233,6 @@ enum State {
     Reset,
 }
 
-type InnerCell = Arc<RwLock<Inner>>;
-
 const DEFAULT_RAW_DATA_MAX: usize = 1_024 * 1_024;
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
@@ -232,24 +262,7 @@ impl UtpSocket {
         let (listener_registration, listener_set_readiness) = Registration::new2();
         let (finalize_tx, finalize_rx) = oneshot::channel();
 
-        let inner = Arc::new(RwLock::new(Inner {
-            shared: Shared {
-                socket: socket,
-                ready: Ready::empty(),
-            },
-            remote: handle.remote().clone(),
-            connections: Slab::new(),
-            connection_lookup: HashMap::new(),
-            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
-            accept_buf: VecDeque::new(),
-            listener: listener_set_readiness,
-            listener_open: true,
-            raw_data_max: DEFAULT_RAW_DATA_MAX,
-            raw_data_buffered: 0,
-            raw_receiver: None,
-            raw_channels: HashMap::new(),
-        }));
-
+        let inner = Inner::new_shared(handle, socket, listener_set_readiness);
         let listener = UtpListener {
             inner: inner.clone(),
             registration: PollEvented::new(listener_registration, handle)?,
@@ -934,20 +947,28 @@ impl Inner {
 
                         Ok(())
                     }
-                    None => {
-                        trace!("no connection associated with ID; treating as raw data");
-
-                        // Send a RESET packet, ignoring errors...
-                        let mut p = Packet::reset();
-                        p.set_connection_id(packet.connection_id());
-
-                        let _ = self.shared.socket.send_to(p.as_slice(), &addr);
-
-                        self.process_raw(packet.into_bytes(), addr, inner)
-                    }
+                    None => self.process_unknown(packet, addr, inner)
                 }
             }
         }
+    }
+
+    /// Handle packets with unknown ID.
+    fn process_unknown(
+        &mut self,
+        packet: Packet,
+        addr: SocketAddr,
+        inner: &InnerCell,
+    ) -> io::Result<()> {
+        trace!("no connection associated with ID; treating as raw data");
+
+        // Send a RESET packet, ignoring errors...
+        let mut p = Packet::reset();
+        p.set_connection_id(packet.connection_id());
+
+        let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+
+        self.process_raw(packet.into_bytes(), addr, inner)
     }
 
     fn process_syn(&mut self,
