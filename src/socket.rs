@@ -962,11 +962,12 @@ impl Inner {
     ) -> io::Result<()> {
         trace!("no connection associated with ID; treating as raw data");
 
-        // Send a RESET packet, ignoring errors...
-        let mut p = Packet::reset();
-        p.set_connection_id(packet.connection_id());
-
-        let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+        if packet.ty() != packet::Type::Reset {
+            // Send a RESET packet, ignoring errors...
+            let mut p = Packet::reset();
+            p.set_connection_id(packet.connection_id());
+            let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+        }
 
         self.process_raw(packet.into_bytes(), addr, inner)
     }
@@ -1710,24 +1711,16 @@ mod tests {
 
         mod process_unknown {
             use super::*;
+            use future_utils::FutureExt;
             use tokio_core::reactor::Core;
 
-            #[test]
-            fn when_packet_is_syn_it_sends_reset_back() {
-                let mut evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
-
-                let mut packet = Packet::syn();
-                packet.set_connection_id(12345);
-
+            /// Creates new UDP socket and waits for incoming uTP packets.
+            /// Returns future that yields received packet and listener address.
+            fn wait_for_packet(handle: &Handle) -> (oneshot::Receiver<Packet>, SocketAddr) {
                 let (packet_tx, packet_rx) = oneshot::channel();
-                let remote_peer = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let remote_peer_addr = unwrap!(remote_peer.local_addr());
-                let recv_response = remote_peer
+                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let listener_addr = unwrap!(listener.local_addr());
+                let recv_response = listener
                     .recv_dgram(vec![0u8; 256])
                     .map(move |(_sock, buff, bytes_received, _addr)| {
                         BytesMut::from(&buff[..bytes_received])
@@ -1739,6 +1732,21 @@ mod tests {
                     })
                     .then(|_| Ok(()));
                 handle.spawn(recv_response);
+                (packet_rx, listener_addr)
+            }
+
+            #[test]
+            fn when_packet_is_syn_it_sends_reset_back() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                let mut packet = Packet::syn();
+                packet.set_connection_id(12345);
 
                 let _ = unwrap!(
                     unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
@@ -1747,6 +1755,30 @@ mod tests {
                 let packet = unwrap!(evloop.run(packet_rx));
                 assert!(packet.connection_id() == 12345);
                 assert!(packet.ty() == packet::Type::Reset);
+            }
+
+            #[test]
+            fn when_packet_is_reset_nothing_is_sent_back() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                let mut packet = Packet::reset();
+                packet.set_connection_id(12345);
+
+                let _ = unwrap!(
+                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
+                );
+
+                let wait_for_response = packet_rx
+                    .with_timeout(Duration::from_secs(1), &handle)
+                    .map(|res_opt| res_opt.is_none());
+                let response_timedout = unwrap!(evloop.run(wait_for_response));
+                assert!(response_timedout);
             }
         }
     }
