@@ -1701,3 +1701,53 @@ impl AsyncWrite for UtpStream {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod inner {
+        use super::*;
+
+        mod process_unknown {
+            use super::*;
+            use tokio_core::reactor::Core;
+
+            #[test]
+            fn when_packet_is_syn_it_sends_reset_back() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                let mut packet = Packet::syn();
+                packet.set_connection_id(12345);
+
+                let (packet_tx, packet_rx) = oneshot::channel();
+                let remote_peer = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let remote_peer_addr = unwrap!(remote_peer.local_addr());
+                let recv_response = remote_peer
+                    .recv_dgram(vec![0u8; 256])
+                    .map(move |(_sock, buff, bytes_received, _addr)| {
+                        BytesMut::from(&buff[..bytes_received])
+                    })
+                    .and_then(move |buff| {
+                        let packet = unwrap!(Packet::parse(buff));
+                        let _ = unwrap!(packet_tx.send(packet));
+                        Ok(())
+                    })
+                    .then(|_| Ok(()));
+                handle.spawn(recv_response);
+
+                let _ = unwrap!(
+                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
+                );
+
+                let packet = unwrap!(evloop.run(packet_rx));
+                assert!(packet.connection_id() == 12345);
+                assert!(packet.ty() == packet::Type::Reset);
+            }
+        }
+    }
+}
