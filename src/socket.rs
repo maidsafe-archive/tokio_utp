@@ -948,7 +948,7 @@ impl Inner {
                         };
 
                         if finalized {
-                            let _ = self.remove_connection(token);
+                            self.remove_connection(token);
                         }
 
                         Ok(())
@@ -1753,7 +1753,7 @@ mod tests {
             /// Returns future that yields received packet and listener address.
             fn wait_for_packet(handle: &Handle) -> (oneshot::Receiver<Packet>, SocketAddr) {
                 let (packet_tx, packet_rx) = oneshot::channel();
-                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), handle));
                 let listener_addr = unwrap!(listener.local_addr());
                 let recv_response = listener
                     .recv_dgram(vec![0u8; 256])
@@ -1762,7 +1762,7 @@ mod tests {
                     })
                     .and_then(move |buff| {
                         let packet = unwrap!(Packet::parse(buff));
-                        let _ = unwrap!(packet_tx.send(packet));
+                        unwrap!(packet_tx.send(packet));
                         Ok(())
                     })
                     .then(|_| Ok(()));
@@ -1783,11 +1783,7 @@ mod tests {
                 let mut packet = Packet::syn();
                 packet.set_connection_id(12345);
 
-                let _ = unwrap!(unwrap!(inner.write()).process_unknown(
-                    packet,
-                    remote_peer_addr,
-                    &inner
-                ));
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 
                 let packet = unwrap!(evloop.run(packet_rx));
                 assert!(packet.connection_id() == 12345);
@@ -1807,11 +1803,7 @@ mod tests {
                 let mut packet = Packet::reset();
                 packet.set_connection_id(12345);
 
-                let _ = unwrap!(unwrap!(inner.write()).process_unknown(
-                    packet,
-                    remote_peer_addr,
-                    &inner
-                ));
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 
                 let wait_for_response = packet_rx
                     .with_timeout(Duration::from_secs(1), &handle)
