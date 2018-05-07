@@ -67,7 +67,7 @@ pub use self::test::{rand, reset_rand, THREAD_RNG};
 
 #[cfg(test)]
 mod test {
-    use rand::{Rand, XorShiftRng, Rng};
+    use rand::{Rand, Rng, XorShiftRng};
     use std::cell::RefCell;
 
     thread_local!(pub static THREAD_RNG: RefCell<XorShiftRng> = {

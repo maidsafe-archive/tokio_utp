@@ -87,10 +87,7 @@ const MAX_HEADER_SIZE: usize = 26;
 
 impl OutQueue {
     /// Create a new `OutQueue` with the specified `seq_nr` and `ack_nr`
-    pub fn new(connection_id: u16,
-               seq_nr: u16,
-               local_ack: Option<u16>) -> OutQueue
-    {
+    pub fn new(connection_id: u16, seq_nr: u16, local_ack: Option<u16>) -> OutQueue {
         OutQueue {
             packets: VecDeque::new(),
             state: State {
@@ -133,7 +130,12 @@ impl OutQueue {
         self.peer_window = val;
     }
 
-    pub fn set_their_ack(&mut self, ack_nr: u16, selective_acks: SmallVec<[u8; 4]>, now: Instant) -> Option<(usize, Duration)> {
+    pub fn set_their_ack(
+        &mut self,
+        ack_nr: u16,
+        selective_acks: SmallVec<[u8; 4]>,
+        now: Instant,
+    ) -> Option<(usize, Duration)> {
         let mut acked_bytes = 0;
         let mut min_rtt = None;
 
@@ -148,7 +150,8 @@ impl OutQueue {
                 ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
                     match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
                         Some(index) => {
-                            selective_acks.get(index / 8).map(|b| *b).unwrap_or(0) & (1 << (index % 8)) != 0
+                            selective_acks.get(index / 8).map(|b| *b).unwrap_or(0)
+                                & (1 << (index % 8)) != 0
                         }
                         None => false,
                     }
@@ -171,15 +174,17 @@ impl OutQueue {
                     // We timed out, but the ack arrived after the timeout... the
                     // packet is ACKed but don't use it for congestion control
                     continue;
-                },
+                }
             };
 
             // Calculate the RTT for the packet.
             let packet_rtt = now.duration_since(last_sent_at);
 
-            min_rtt = Some(min_rtt
-                .map(|curr| cmp::min(curr, packet_rtt))
-                .unwrap_or(packet_rtt));
+            min_rtt = Some(
+                min_rtt
+                    .map(|curr| cmp::min(curr, packet_rtt))
+                    .unwrap_or(packet_rtt),
+            );
 
             if p.num_sends == 1 {
                 // Use the packet to update rtt & rtt_variance
@@ -194,7 +199,6 @@ impl OutQueue {
                     self.rtt += (packet_rtt - self.rtt) / 8;
                 }
             }
-
         }
         min_rtt.map(|rtt| (acked_bytes, rtt))
     }
@@ -309,10 +313,12 @@ impl OutQueue {
         }
 
         if self.state.local_ack != self.state.last_ack {
-            trace!("ack_required; local={:?}; last={:?}; seq_nr={:?}",
-                   self.state.local_ack,
-                   self.state.last_ack,
-                   self.state.seq_nr);
+            trace!(
+                "ack_required; local={:?}; last={:?}; seq_nr={:?}",
+                self.state.local_ack,
+                self.state.last_ack,
+                self.state.seq_nr
+            );
 
             let mut packet = Packet::state();
 
@@ -367,9 +373,7 @@ impl OutQueue {
         trace!("write; remaining={:?}; src={:?}", rem, src.len());
 
         while rem > MAX_HEADER_SIZE {
-            let packet_len = cmp::min(
-                MAX_PACKET_SIZE,
-                cmp::min(src.len(), rem - MAX_HEADER_SIZE));
+            let packet_len = cmp::min(MAX_PACKET_SIZE, cmp::min(src.len(), rem - MAX_HEADER_SIZE));
 
             if packet_len == 0 {
                 break;
@@ -408,7 +412,8 @@ impl OutQueue {
 
     fn in_flight(&self) -> usize {
         // TODO: Don't iterate each time
-        self.packets.iter()
+        self.packets
+            .iter()
             .filter(|p| p.last_sent_at.is_some() && !p.acked)
             .map(|p| p.packet.len())
             .sum()
@@ -416,9 +421,7 @@ impl OutQueue {
 
     fn buffered(&self) -> usize {
         // TODO: Don't iterate each time
-        self.packets.iter()
-            .map(|p| p.packet.len())
-            .sum()
+        self.packets.iter().map(|p| p.packet.len()).sum()
     }
 
     fn timestamp(&self) -> u32 {

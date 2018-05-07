@@ -1,10 +1,10 @@
-use {MAX_WINDOW_SIZE, MAX_DELTA_SEQ};
+use {MAX_DELTA_SEQ, MAX_WINDOW_SIZE};
 use packet::{self, Packet};
 
-use bytes::{BytesMut, Buf};
+use bytes::{Buf, BytesMut};
 
 use std::{mem, u16};
-use std::io::{self, Read, Cursor};
+use std::io::{self, Cursor, Read};
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -92,7 +92,11 @@ impl InQueue {
     }
 
     pub fn push(&mut self, packet: Packet) -> bool {
-        trace!("InQueue::push; packet={:?}; ack_nr={:?}", packet, self.ack_nr);
+        trace!(
+            "InQueue::push; packet={:?}; ack_nr={:?}",
+            packet,
+            self.ack_nr
+        );
 
         // State packets are handled outside of this queue
         assert!(packet.ty() != packet::Type::State);
@@ -122,7 +126,11 @@ impl InQueue {
             return false;
         }
 
-        trace!("    -> tracking packet; seq_nr={:?}; slot={:?}", seq_nr, slot);
+        trace!(
+            "    -> tracking packet; seq_nr={:?}; slot={:?}",
+            seq_nr,
+            slot
+        );
 
         self.packets[slot] = Some(packet);
         true
@@ -164,9 +172,7 @@ impl InQueue {
     }
 
     pub fn bytes_pending(&self) -> usize {
-        self.data.iter()
-            .map(|p| p.get_ref().len())
-            .sum()
+        self.data.iter().map(|p| p.get_ref().len()).sum()
     }
 
     pub fn set_initial_ack_nr(&mut self, ack_nr: u16) {
