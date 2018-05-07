@@ -642,7 +642,8 @@ impl UtpStream {
     pub fn set_disconnect_timeout(&self, duration: Duration) {
         let mut inner = unwrap!(self.inner.write());
         let connection = &mut inner.connections[self.token];
-        connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
+        connection.disconnect_timeout_secs =
+            cmp::min(u64::from(u32::MAX), duration.as_secs()) as u32;
     }
 }
 
@@ -1347,7 +1348,7 @@ impl Connection {
         }
 
         let now = Instant::now();
-        if now > self.last_recv_time + Duration::new(self.disconnect_timeout_secs as u64, 0) {
+        if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
             // Send the RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(self.out_queue.connection_id());
@@ -1411,9 +1412,9 @@ impl Connection {
                 let dist_up = actual_delay.wrapping_sub(self.average_delay_base);
 
                 if dist_down > dist_up {
-                    average_delay_sample = dist_up as i64;
+                    average_delay_sample = i64::from(dist_up);
                 } else {
-                    average_delay_sample = -(dist_down as i64);
+                    average_delay_sample = -i64::from(dist_down);
                 }
 
                 self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
@@ -1445,9 +1446,9 @@ impl Connection {
                     }
 
                     // Update the clock drive estimate
-                    let drift = self.average_delay as i64 - prev_average_delay as i64;
+                    let drift = i64::from(self.average_delay) - i64::from(prev_average_delay);
 
-                    self.clock_drift = ((self.clock_drift as i64 * 7 + drift) / 8) as i32;
+                    self.clock_drift = ((i64::from(self.clock_drift) * 7 + drift) / 8) as i32;
                 }
             }
         }
@@ -1500,11 +1501,11 @@ impl Connection {
             }
         }
 
-        let off_target = ((target as i64) - (our_delay as i64)) as f64;
+        let off_target = (i64::from(target) - i64::from(our_delay)) as f64;
         let window_factor =
             cmp::min(bytes_acked, max_window) as f64 / cmp::max(max_window, bytes_acked) as f64;
 
-        let delay_factor = off_target / target as f64;
+        let delay_factor = off_target / f64::from(target);
         let mut scaled_gain = MAX_CWND_INCREASE_BYTES_PER_RTT as f64 * window_factor * delay_factor;
 
         if scaled_gain > 0.0 && now - self.last_maxed_out_window > Duration::from_secs(1) {
@@ -1527,7 +1528,7 @@ impl Connection {
 
             if ss_cwnd > SLOW_START_THRESHOLD {
                 self.slow_start = false;
-            } else if our_delay > (target as f64 * 0.9) as u32 {
+            } else if our_delay > (f64::from(target) * 0.9) as u32 {
                 // Even if we're a little under the target delay, we
                 // conservatively discontinue the slow start phase
                 self.slow_start = false;
