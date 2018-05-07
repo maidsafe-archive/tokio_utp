@@ -1526,9 +1526,7 @@ impl Connection {
         if self.slow_start {
             let ss_cwnd = max_window + window_factor as usize * MAX_DATA_SIZE;
 
-            if ss_cwnd > SLOW_START_THRESHOLD {
-                self.slow_start = false;
-            } else if our_delay > (f64::from(target) * 0.9) as u32 {
+            if ss_cwnd > SLOW_START_THRESHOLD || our_delay > (f64::from(target) * 0.9) as u32 {
                 // Even if we're a little under the target delay, we
                 // conservatively discontinue the slow start phase
                 self.slow_start = false;
