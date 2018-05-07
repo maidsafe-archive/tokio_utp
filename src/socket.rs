@@ -1061,7 +1061,7 @@ impl Inner {
         // Notify the listener
         self.listener.set_readiness(Ready::readable())?;
 
-        return Ok(());
+        Ok(())
     }
 
     fn process_raw(
@@ -1139,7 +1139,7 @@ impl Inner {
     }
 
     fn flush_all(&mut self) -> io::Result<bool> {
-        if self.connection_lookup.len() == 0 {
+        if self.connection_lookup.is_empty() {
             return Ok(true);
         }
 
@@ -1177,7 +1177,7 @@ impl Inner {
 
 impl Shared {
     fn update_ready(&mut self, ready: Ready) {
-        self.ready = self.ready | ready;
+        self.ready |= ready;
     }
 
     fn is_writable(&self) -> bool {

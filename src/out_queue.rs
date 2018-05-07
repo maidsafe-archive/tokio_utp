@@ -150,8 +150,8 @@ impl OutQueue {
                 ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
                     match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
                         Some(index) => {
-                            selective_acks.get(index / 8).map(|b| *b).unwrap_or(0)
-                                & (1 << (index % 8)) != 0
+                            selective_acks.get(index / 8).cloned().unwrap_or(0) & (1 << (index % 8))
+                                != 0
                         }
                         None => false,
                     }
@@ -292,11 +292,9 @@ impl OutQueue {
                 if in_flight + entry.packet.len() > max {
                     return None;
                 }
-            } else {
+            } else if entry.packet.len() > self.peer_window as usize {
                 // Don't send more data than the window allows
-                if entry.packet.len() > self.peer_window as usize {
-                    return None;
-                }
+                return None;
             }
 
             // Update timestamp
@@ -359,7 +357,7 @@ impl OutQueue {
 
     /// Push data into the outbound queue
     pub fn write(&mut self, mut src: &[u8]) -> io::Result<usize> {
-        if src.len() == 0 {
+        if src.is_empty() {
             return Ok(0);
         }
 
