@@ -291,23 +291,22 @@ mod tests {
         #[test]
         fn parse() {
             let mut orig_packet = Packet::reset();
-            orig_packet.set_connection_id(12345);
-            orig_packet.set_timestamp(198765);
+            orig_packet.set_connection_id(12_345);
+            orig_packet.set_timestamp(198_765);
             orig_packet.set_timestamp_diff(123);
-            orig_packet.set_wnd_size(65000);
+            orig_packet.set_wnd_size(65_000);
             orig_packet.set_seq_nr(100);
             orig_packet.set_ack_nr(99);
             let bytes = BytesMut::from(orig_packet.as_slice());
 
             let packet = unwrap!(Packet::parse(bytes));
 
-            assert!(packet.connection_id() == 12345);
-            assert!(packet.timestamp() == 198765);
+            assert!(packet.connection_id() == 12_345);
+            assert!(packet.timestamp() == 198_765);
             assert!(packet.timestamp_diff() == 123);
-            assert!(packet.wnd_size() == 65000);
+            assert!(packet.wnd_size() == 65_000);
             assert!(packet.seq_nr() == 100);
             assert!(packet.ack_nr() == 99);
         }
-
     }
 }

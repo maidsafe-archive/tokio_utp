@@ -1774,12 +1774,12 @@ mod tests {
 
                 let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
                 let mut packet = Packet::syn();
-                packet.set_connection_id(12345);
+                packet.set_connection_id(12_345);
 
                 unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 
                 let packet = unwrap!(evloop.run(packet_rx));
-                assert!(packet.connection_id() == 12345);
+                assert!(packet.connection_id() == 12_345);
                 assert!(packet.ty() == packet::Type::Reset);
             }
 
@@ -1794,7 +1794,7 @@ mod tests {
 
                 let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
                 let mut packet = Packet::reset();
-                packet.set_connection_id(12345);
+                packet.set_connection_id(12_345);
 
                 unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 

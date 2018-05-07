@@ -39,4 +39,4 @@ pub use socket::{Incoming, RawChannel, RawReceiver, UtpListener, UtpSocket, UtpS
 // max window size
 const MAX_WINDOW_SIZE: usize = 64 * 1_024;
 const MAX_DELTA_SEQ: usize = 32;
-const TIMESTAMP_MASK: u32 = 0xFFFFFFFF;
+const TIMESTAMP_MASK: u32 = 0xFFFF_FFFF;
