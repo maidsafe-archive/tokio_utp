@@ -1121,21 +1121,19 @@ impl Inner {
     }
 
     fn recv_from(&mut self) -> io::Result<(BytesMut, SocketAddr)> {
-        loop {
-            // Ensure the buffer has at least 4kb of available space.
-            self.in_buf.reserve(MIN_BUFFER_SIZE);
+        // Ensure the buffer has at least 4kb of available space.
+        self.in_buf.reserve(MIN_BUFFER_SIZE);
 
-            // Read in the bytes
-            let addr = unsafe {
-                let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
-                self.in_buf.advance_mut(n);
-                addr
-            };
+        // Read in the bytes
+        let addr = unsafe {
+            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+            self.in_buf.advance_mut(n);
+            addr
+        };
 
-            let bytes = self.in_buf.take();
+        let bytes = self.in_buf.take();
 
-            return Ok((bytes, addr));
-        }
+        Ok((bytes, addr))
     }
 
     fn flush_all(&mut self) -> io::Result<bool> {
