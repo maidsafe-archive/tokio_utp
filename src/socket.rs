@@ -1654,15 +1654,10 @@ impl Future for SocketRefresher {
 
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
-        loop {
-            match self.timeout.poll()? {
-                Async::Ready(()) => {
-                    unwrap!(self.inner.write()).tick()?;
-                    self.next_tick += Duration::from_millis(500);
-                    self.timeout.reset(self.next_tick);
-                }
-                Async::NotReady => break,
-            }
+        while let Async::Ready(()) = self.timeout.poll()? {
+            unwrap!(self.inner.write()).tick()?;
+            self.next_tick += Duration::from_millis(500);
+            self.timeout.reset(self.next_tick);
         }
 
         if let Async::Ready(true) = unwrap!(self.inner.write()).refresh(&self.inner)? {
