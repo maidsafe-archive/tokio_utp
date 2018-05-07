@@ -761,8 +761,8 @@ impl Inner {
         let (receive_id, mut send_id) = util::generate_sequential_identifiers();
 
         let mut key = Key {
-            receive_id: receive_id,
-            addr: addr.clone(),
+            receive_id,
+            addr: *addr,
         };
 
         // Because the IDs are randomly generated, there could already be an
