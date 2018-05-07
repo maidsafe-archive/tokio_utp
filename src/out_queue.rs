@@ -133,7 +133,7 @@ impl OutQueue {
     pub fn set_their_ack(
         &mut self,
         ack_nr: u16,
-        selective_acks: SmallVec<[u8; 4]>,
+        selective_acks: &SmallVec<[u8; 4]>,
         now: Instant,
     ) -> Option<(usize, Duration)> {
         let mut acked_bytes = 0;

@@ -933,7 +933,7 @@ impl Inner {
         match packet.ty() {
             packet::Type::Syn => {
                 // SYN packets are special
-                self.process_syn(packet, addr, inner)
+                self.process_syn(&packet, addr, inner)
             }
             _ => {
                 // All other packets are associated with a connection, and as
@@ -980,7 +980,7 @@ impl Inner {
 
     fn process_syn(
         &mut self,
-        packet: Packet,
+        packet: &Packet,
         addr: SocketAddr,
         inner: &InnerCell,
     ) -> io::Result<()> {
@@ -1456,7 +1456,7 @@ impl Connection {
         // Ack all packets
         if let Some((acked_bytes, min_rtt)) =
             self.out_queue
-                .set_their_ack(packet.ack_nr(), packet.selective_acks(), now)
+                .set_their_ack(packet.ack_nr(), &packet.selective_acks(), now)
         {
             let min_rtt = util::as_wrapping_micros(min_rtt);
 
