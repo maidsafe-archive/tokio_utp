@@ -113,6 +113,38 @@ struct Inner {
     raw_channels: HashMap<SocketAddr, (UnboundedSender<BytesMut>, SetReadiness)>,
 }
 
+type InnerCell = Arc<RwLock<Inner>>;
+
+impl Inner {
+    fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
+        Inner {
+            shared: Shared {
+                socket: socket,
+                ready: Ready::empty(),
+            },
+            remote: handle.remote().clone(),
+            connections: Slab::new(),
+            connection_lookup: HashMap::new(),
+            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
+            accept_buf: VecDeque::new(),
+            listener: listener_set_readiness,
+            listener_open: true,
+            raw_data_max: DEFAULT_RAW_DATA_MAX,
+            raw_data_buffered: 0,
+            raw_receiver: None,
+            raw_channels: HashMap::new(),
+        }
+    }
+
+    fn new_shared(
+        handle: &Handle,
+        socket: UdpSocket,
+        listener_set_readiness: SetReadiness,
+    ) -> InnerCell {
+        Arc::new(RwLock::new(Inner::new(handle, socket, listener_set_readiness)))
+    }
+}
+
 unsafe impl Send for Inner {}
 
 struct Shared {
@@ -201,8 +233,6 @@ enum State {
     Reset,
 }
 
-type InnerCell = Arc<RwLock<Inner>>;
-
 const DEFAULT_RAW_DATA_MAX: usize = 1_024 * 1_024;
 const MIN_BUFFER_SIZE: usize = 4 * 1_024;
 const DEFAULT_IN_BUFFER_SIZE: usize = 64 * 1024;
@@ -232,24 +262,7 @@ impl UtpSocket {
         let (listener_registration, listener_set_readiness) = Registration::new2();
         let (finalize_tx, finalize_rx) = oneshot::channel();
 
-        let inner = Arc::new(RwLock::new(Inner {
-            shared: Shared {
-                socket: socket,
-                ready: Ready::empty(),
-            },
-            remote: handle.remote().clone(),
-            connections: Slab::new(),
-            connection_lookup: HashMap::new(),
-            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
-            accept_buf: VecDeque::new(),
-            listener: listener_set_readiness,
-            listener_open: true,
-            raw_data_max: DEFAULT_RAW_DATA_MAX,
-            raw_data_buffered: 0,
-            raw_receiver: None,
-            raw_channels: HashMap::new(),
-        }));
-
+        let inner = Inner::new_shared(handle, socket, listener_set_readiness);
         let listener = UtpListener {
             inner: inner.clone(),
             registration: PollEvented::new(listener_registration, handle)?,
@@ -934,20 +947,29 @@ impl Inner {
 
                         Ok(())
                     }
-                    None => {
-                        trace!("no connection associated with ID; treating as raw data");
-
-                        // Send a RESET packet, ignoring errors...
-                        let mut p = Packet::reset();
-                        p.set_connection_id(packet.connection_id());
-
-                        let _ = self.shared.socket.send_to(p.as_slice(), &addr);
-
-                        self.process_raw(packet.into_bytes(), addr, inner)
-                    }
+                    None => self.process_unknown(packet, addr, inner)
                 }
             }
         }
+    }
+
+    /// Handle packets with unknown ID.
+    fn process_unknown(
+        &mut self,
+        packet: Packet,
+        addr: SocketAddr,
+        inner: &InnerCell,
+    ) -> io::Result<()> {
+        trace!("no connection associated with ID; treating as raw data");
+
+        if packet.ty() != packet::Type::Reset {
+            // Send a RESET packet, ignoring errors...
+            let mut p = Packet::reset();
+            p.set_connection_id(packet.connection_id());
+            let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+        }
+
+        self.process_raw(packet.into_bytes(), addr, inner)
     }
 
     fn process_syn(&mut self,
@@ -1680,3 +1702,84 @@ impl AsyncWrite for UtpStream {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod inner {
+        use super::*;
+
+        mod process_unknown {
+            use super::*;
+            use future_utils::FutureExt;
+            use tokio_core::reactor::Core;
+
+            /// Creates new UDP socket and waits for incoming uTP packets.
+            /// Returns future that yields received packet and listener address.
+            fn wait_for_packet(handle: &Handle) -> (oneshot::Receiver<Packet>, SocketAddr) {
+                let (packet_tx, packet_rx) = oneshot::channel();
+                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let listener_addr = unwrap!(listener.local_addr());
+                let recv_response = listener
+                    .recv_dgram(vec![0u8; 256])
+                    .map(move |(_sock, buff, bytes_received, _addr)| {
+                        BytesMut::from(&buff[..bytes_received])
+                    })
+                    .and_then(move |buff| {
+                        let packet = unwrap!(Packet::parse(buff));
+                        let _ = unwrap!(packet_tx.send(packet));
+                        Ok(())
+                    })
+                    .then(|_| Ok(()));
+                handle.spawn(recv_response);
+                (packet_rx, listener_addr)
+            }
+
+            #[test]
+            fn when_packet_is_syn_it_sends_reset_back() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                let mut packet = Packet::syn();
+                packet.set_connection_id(12345);
+
+                let _ = unwrap!(
+                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
+                );
+
+                let packet = unwrap!(evloop.run(packet_rx));
+                assert!(packet.connection_id() == 12345);
+                assert!(packet.ty() == packet::Type::Reset);
+            }
+
+            #[test]
+            fn when_packet_is_reset_nothing_is_sent_back() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                let mut packet = Packet::reset();
+                packet.set_connection_id(12345);
+
+                let _ = unwrap!(
+                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
+                );
+
+                let wait_for_response = packet_rx
+                    .with_timeout(Duration::from_secs(1), &handle)
+                    .map(|res_opt| res_opt.is_none());
+                let response_timedout = unwrap!(evloop.run(wait_for_response));
+                assert!(response_timedout);
+            }
+        }
+    }
+}
