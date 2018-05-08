@@ -2,7 +2,6 @@
 
 use {util, MAX_WINDOW_SIZE};
 use packet::{self, Packet};
-use smallvec::SmallVec;
 
 use std::{cmp, io};
 use std::collections::VecDeque;
@@ -133,7 +132,7 @@ impl OutQueue {
     pub fn set_their_ack(
         &mut self,
         ack_nr: u16,
-        selective_acks: &SmallVec<[u8; 4]>,
+        selective_acks: &[u8],
         now: Instant,
     ) -> Option<(usize, Duration)> {
         let mut acked_bytes = 0;
