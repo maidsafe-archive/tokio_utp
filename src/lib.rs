@@ -28,6 +28,8 @@ mod util;
 #[cfg(test)]
 extern crate env_logger;
 #[cfg(test)]
+#[cfg(target_os = "linux")]
+#[cfg(feature = "netsim")]
 extern crate netsim;
 
 #[cfg(test)]
