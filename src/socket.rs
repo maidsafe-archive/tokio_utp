@@ -1782,7 +1782,10 @@ mod tests {
                         &inner
                     ));
 
-                    packet_rx
+                    packet_rx.map(move |packet| {
+                        drop(inner);
+                        packet
+                    })
                 });
                 let packet = unwrap!(evloop.run(task));
 
@@ -1812,7 +1815,10 @@ mod tests {
 
                     packet_rx
                         .with_timeout(Duration::from_secs(1), &handle)
-                        .map(move |res_opt| res_opt.is_none())
+                        .map(move |res_opt| {
+                            drop(inner);
+                            res_opt.is_none()
+                        })
                 });
 
                 let response_timedout = unwrap!(evloop.run(task));
