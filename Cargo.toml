@@ -33,4 +33,4 @@ env_logger = "0.4.2"
 default = ["netsim"]
 [target."cfg(target_os = \"linux\")".dependencies.netsim]
 optional = true
-version = "~0.1.5"
+version = "~0.1.10"
