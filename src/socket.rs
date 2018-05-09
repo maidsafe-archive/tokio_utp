@@ -1737,6 +1737,7 @@ mod tests {
 
         mod process_unknown {
             use super::*;
+            use futures::future;
             use future_utils::FutureExt;
             use tokio_core::reactor::Core;
 
@@ -1766,17 +1767,25 @@ mod tests {
                 let mut evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
 
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let task = future::lazy(|| {
+                    let (_listener_registration, listener_set_readiness) = Registration::new2();
+                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
 
-                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
-                let mut packet = Packet::syn();
-                packet.set_connection_id(12_345);
+                    let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                    let mut packet = Packet::syn();
+                    packet.set_connection_id(12_345);
 
-                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
+                    unwrap!(unwrap!(inner.write()).process_unknown(
+                        packet,
+                        remote_peer_addr,
+                        &inner
+                    ));
 
-                let packet = unwrap!(evloop.run(packet_rx));
+                    packet_rx
+                });
+                let packet = unwrap!(evloop.run(task));
+
                 assert!(packet.connection_id() == 12_345);
                 assert!(packet.ty() == packet::Type::Reset);
             }
@@ -1786,20 +1795,27 @@ mod tests {
                 let mut evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
 
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let task = future::lazy(|| {
+                    let (_listener_registration, listener_set_readiness) = Registration::new2();
+                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
 
-                let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
-                let mut packet = Packet::reset();
-                packet.set_connection_id(12_345);
+                    let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
+                    let mut packet = Packet::reset();
+                    packet.set_connection_id(12_345);
 
-                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
+                    unwrap!(unwrap!(inner.write()).process_unknown(
+                        packet,
+                        remote_peer_addr,
+                        &inner
+                    ));
 
-                let wait_for_response = packet_rx
-                    .with_timeout(Duration::from_secs(1), &handle)
-                    .map(|res_opt| res_opt.is_none());
-                let response_timedout = unwrap!(evloop.run(wait_for_response));
+                    packet_rx
+                        .with_timeout(Duration::from_secs(1), &handle)
+                        .map(move |res_opt| res_opt.is_none())
+                });
+
+                let response_timedout = unwrap!(evloop.run(task));
                 assert!(response_timedout);
             }
         }
