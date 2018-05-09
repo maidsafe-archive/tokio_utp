@@ -1,34 +1,36 @@
 [package]
-name = "tokio-utp"
-version = "0.3.0"
-authors = ["Carl Lerche <me@carllerche.com>", "Andrew Cann <shum@canndrew.org>"]
-license = "MIT/Apache-2.0"
-repository = "https://github.com/canndrew/tokio-utp"
-documentation = "https://docs.rs/tokio-utp"
+authors = [
+    "Carl Lerche <me@carllerche.com>",
+    "Andrew Cann <shum@canndrew.org>",
+]
 description = "tokio-based uTP implementation"
+documentation = "https://docs.rs/tokio-utp"
+license = "MIT/Apache-2.0"
+name = "tokio-utp"
+repository = "https://github.com/canndrew/tokio-utp"
+version = "0.3.0"
 
 [dependencies]
-mio = "0.6.9"
+byteorder = "1.0"
 bytes = "0.4"
+future-utils = "0.9.0"
+futures = "0.1.16"
+log = "0.3.7"
+mio = "0.6.9"
+net-literals = "0.1.2"
 rand = "0.3"
 slab = "0.4.0"
-byteorder = "1.0"
-log = "0.3.7"
 smallvec = "0.4"
 tokio-core = "0.1.9"
 tokio-io = "0.1.3"
 unwrap = "1.1.0"
-futures = "0.1.16"
 void = "1"
-future-utils = "0.9.0"
-net-literals = "0.1.2"
 
 [dev-dependencies]
 env_logger = "0.4.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-netsim = { version = "~0.1.5", optional = true }
-
 [features]
 default = ["netsim"]
-
+[target."cfg(target_os = \"linux\")".dependencies.netsim]
+optional = true
+version = "~0.1.5"
