@@ -1136,6 +1136,7 @@ impl Inner {
         Ok((bytes, addr))
     }
 
+    /// Returns true, if socket is still ready to write.
     fn flush_all(&mut self) -> io::Result<bool> {
         if self.connection_lookup.is_empty() {
             return Ok(true);
@@ -1283,6 +1284,7 @@ impl Connection {
         Ok(self.is_finalized())
     }
 
+    /// Returns true, if socket is still ready to write.
     fn flush(&mut self, shared: &mut Shared) -> io::Result<bool> {
         let mut sent = false;
 
