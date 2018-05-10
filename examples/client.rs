@@ -1,11 +1,11 @@
-extern crate tokio_utp;
 extern crate env_logger;
+extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
-extern crate futures;
-extern crate void;
+extern crate tokio_utp;
 #[macro_use]
 extern crate unwrap;
+extern crate void;
 
 use tokio_utp::*;
 
@@ -28,25 +28,25 @@ pub fn main() {
         let (socket, _) = unwrap!(UtpSocket::bind(&local_addr, &handle));
 
         // connect to the server
-        socket.connect(&remote_addr).and_then(|stream| {
-
-            // send it some data
-            println!("sending \"hello world\" to server");
-            tokio_io::io::write_all(stream, "hello world").and_then(|(stream, _)| {
-
-                // shutdown our the write side of the connection.
-                tokio_io::io::shutdown(stream).and_then(|stream| {
-
-                    // read the stream to completion.
-                    tokio_io::io::read_to_end(stream, Vec::new()).and_then(|(_, data)| {
-                        println!("received {:?} from server", String::from_utf8(data));
-                        Ok(())
+        socket
+            .connect(&remote_addr)
+            .and_then(|stream| {
+                // send it some data
+                println!("sending \"hello world\" to server");
+                tokio_io::io::write_all(stream, "hello world").and_then(|(stream, _)| {
+                    // shutdown our the write side of the connection.
+                    tokio_io::io::shutdown(stream).and_then(|stream| {
+                        // read the stream to completion.
+                        tokio_io::io::read_to_end(stream, Vec::new()).and_then(|(_, data)| {
+                            println!("received {:?} from server", String::from_utf8(data));
+                            Ok(())
+                        })
                     })
                 })
             })
-        }).then(|res| {
-            unwrap!(res);
-            Ok(())
-        })
+            .then(|res| {
+                unwrap!(res);
+                Ok(())
+            })
     }));
 }

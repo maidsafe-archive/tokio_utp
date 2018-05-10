@@ -1,11 +1,11 @@
-extern crate tokio_utp;
 extern crate env_logger;
+extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
-extern crate futures;
-extern crate void;
+extern crate tokio_utp;
 #[macro_use]
 extern crate unwrap;
+extern crate void;
 
 use tokio_utp::*;
 use futures::{future, Future, Stream};
@@ -25,12 +25,15 @@ pub fn main() {
     let handle = core.handle();
     let _: Result<(), Void> = core.run(future::lazy(|| {
         let (_, listener) = unwrap!(UtpSocket::bind(&addr, &handle));
-        listener.incoming().for_each(|stream| {
-            let (reader, writer) = stream.split();
-            tokio_io::io::copy(reader, writer).map(|_| ())
-        }).then(|res| {
-            unwrap!(res);
-            Ok(())
-        })
+        listener
+            .incoming()
+            .for_each(|stream| {
+                let (reader, writer) = stream.split();
+                tokio_io::io::copy(reader, writer).map(|_| ())
+            })
+            .then(|res| {
+                unwrap!(res);
+                Ok(())
+            })
     }));
 }

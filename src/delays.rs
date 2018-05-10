@@ -24,11 +24,8 @@ impl Delays {
     }
 
     pub fn get(&self) -> Option<u32> {
-        if self.last_step.is_none() {
-            return None;
-        }
-
-        self.curr_delays.iter().min().map(|&v| v)
+        self.last_step?;
+        self.curr_delays.iter().min().cloned()
     }
 
     pub fn base_delay(&self) -> Option<u32> {

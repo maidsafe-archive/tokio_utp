@@ -1,5 +1,5 @@
-use bytes::{BytesMut, BufMut};
-use byteorder::{ByteOrder, BigEndian};
+use bytes::{BufMut, BytesMut};
+use byteorder::{BigEndian, ByteOrder};
 use smallvec::SmallVec;
 
 use std::fmt;
@@ -138,51 +138,51 @@ impl Packet {
     }
 
     pub fn connection_id(&self) -> u16 {
-        BigEndian::read_u16(&self.data[self.padding + 2 .. self.padding + 4])
+        BigEndian::read_u16(&self.data[self.padding + 2..self.padding + 4])
     }
 
     pub fn set_connection_id(&mut self, val: u16) {
-        BigEndian::write_u16(&mut self.data[self.padding + 2 .. self.padding + 4], val)
+        BigEndian::write_u16(&mut self.data[self.padding + 2..self.padding + 4], val)
     }
 
     pub fn timestamp(&self) -> u32 {
-        BigEndian::read_u32(&self.data[self.padding + 4 .. self.padding + 8])
+        BigEndian::read_u32(&self.data[self.padding + 4..self.padding + 8])
     }
 
     pub fn set_timestamp(&mut self, val: u32) {
-        BigEndian::write_u32(&mut self.data[self.padding + 4 .. self.padding + 8], val)
+        BigEndian::write_u32(&mut self.data[self.padding + 4..self.padding + 8], val)
     }
 
     pub fn timestamp_diff(&self) -> u32 {
-        BigEndian::read_u32(&self.data[self.padding + 8 .. self.padding + 12])
+        BigEndian::read_u32(&self.data[self.padding + 8..self.padding + 12])
     }
 
     pub fn set_timestamp_diff(&mut self, val: u32) {
-        BigEndian::write_u32(&mut self.data[self.padding + 8 .. self.padding + 12], val)
+        BigEndian::write_u32(&mut self.data[self.padding + 8..self.padding + 12], val)
     }
 
     pub fn wnd_size(&self) -> u32 {
-        BigEndian::read_u32(&self.data[self.padding + 12 .. self.padding + 16])
+        BigEndian::read_u32(&self.data[self.padding + 12..self.padding + 16])
     }
 
     pub fn set_wnd_size(&mut self, val: u32) {
-        BigEndian::write_u32(&mut self.data[self.padding + 12 .. self.padding + 16], val);
+        BigEndian::write_u32(&mut self.data[self.padding + 12..self.padding + 16], val);
     }
 
     pub fn seq_nr(&self) -> u16 {
-        BigEndian::read_u16(&self.data[self.padding + 16 .. self.padding + 18])
+        BigEndian::read_u16(&self.data[self.padding + 16..self.padding + 18])
     }
 
     pub fn set_seq_nr(&mut self, val: u16) {
-        BigEndian::write_u16(&mut self.data[self.padding + 16 .. self.padding + 18], val);
+        BigEndian::write_u16(&mut self.data[self.padding + 16..self.padding + 18], val);
     }
 
     pub fn ack_nr(&self) -> u16 {
-        BigEndian::read_u16(&self.data[self.padding + 18 .. self.padding + 20])
+        BigEndian::read_u16(&self.data[self.padding + 18..self.padding + 20])
     }
 
     pub fn set_ack_nr(&mut self, val: u16) {
-        BigEndian::write_u16(&mut self.data[self.padding + 18 .. self.padding + 20], val);
+        BigEndian::write_u16(&mut self.data[self.padding + 18..self.padding + 20], val);
     }
 
     fn payload_start_index(&self) -> usize {
@@ -224,7 +224,7 @@ impl Packet {
                 self.data[20] = 0;
                 self.data[21] = 4;
             }
-            self.data[22 .. 26].copy_from_slice(&selective_acks[..]);
+            self.data[22..26].copy_from_slice(&selective_acks[..]);
         }
     }
 
@@ -233,8 +233,8 @@ impl Packet {
         let mut next_index = self.padding + 20;
         loop {
             match self.data[ext_index] {
-                0   => return SmallVec::new(),
-                1   => {
+                0 => return SmallVec::new(),
+                1 => {
                     ext_index = next_index;
                     let len = self.data[ext_index + 1] as usize;
                     let mut ret = SmallVec::new();
@@ -242,14 +242,14 @@ impl Packet {
                     unsafe {
                         ret.set_len(len);
                     }
-                    ret[0..].copy_from_slice(&self.data[ext_index + 2 .. ext_index + 2 + len]);
+                    ret[0..].copy_from_slice(&self.data[ext_index + 2..ext_index + 2 + len]);
                     return ret;
-                },
-                _   => {
+                }
+                _ => {
                     ext_index = next_index;
                     let len = self.data[ext_index + 1] as usize;
                     next_index += 2 + len;
-                },
+                }
             }
         }
     }
@@ -259,7 +259,7 @@ impl Default for Packet {
     fn default() -> Packet {
         Packet {
             padding: 6,
-            data: BytesMut::from(&DEFAULT[..])
+            data: BytesMut::from(&DEFAULT[..]),
         }
     }
 }
@@ -291,23 +291,22 @@ mod tests {
         #[test]
         fn parse() {
             let mut orig_packet = Packet::reset();
-            orig_packet.set_connection_id(12345);
-            orig_packet.set_timestamp(198765);
+            orig_packet.set_connection_id(12_345);
+            orig_packet.set_timestamp(198_765);
             orig_packet.set_timestamp_diff(123);
-            orig_packet.set_wnd_size(65000);
+            orig_packet.set_wnd_size(65_000);
             orig_packet.set_seq_nr(100);
             orig_packet.set_ack_nr(99);
             let bytes = BytesMut::from(orig_packet.as_slice());
 
             let packet = unwrap!(Packet::parse(bytes));
 
-            assert!(packet.connection_id() == 12345);
-            assert!(packet.timestamp() == 198765);
+            assert!(packet.connection_id() == 12_345);
+            assert!(packet.timestamp() == 198_765);
             assert!(packet.timestamp_diff() == 123);
-            assert!(packet.wnd_size() == 65000);
+            assert!(packet.wnd_size() == 65_000);
             assert!(packet.seq_nr() == 100);
             assert!(packet.ack_nr() == 99);
         }
-
     }
 }

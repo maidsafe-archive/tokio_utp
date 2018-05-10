@@ -6,7 +6,7 @@ pub fn as_ms(duration: Duration) -> u64 {
         30_000
     } else {
         let sub_secs = duration.subsec_nanos() / NANOS_PER_MS;
-        duration.as_secs() * 1000 + sub_secs as u64
+        duration.as_secs() * 1000 + u64::from(sub_secs)
     }
 }
 
@@ -24,7 +24,7 @@ const NANOS_PER_MICRO: u32 = 1_000;
 
 pub fn as_wrapping_micros(duration: Duration) -> u32 {
     // Wrapping is OK
-    let mut ret = duration.as_secs().wrapping_mul(MICROS_PER_SEC as u64) as u32;
+    let mut ret = duration.as_secs().wrapping_mul(u64::from(MICROS_PER_SEC)) as u32;
     ret += duration.subsec_nanos() / NANOS_PER_MICRO;
     ret
 }
@@ -67,7 +67,7 @@ pub use self::test::{rand, reset_rand, THREAD_RNG};
 
 #[cfg(test)]
 mod test {
-    use rand::{Rand, XorShiftRng, Rng};
+    use rand::{Rand, Rng, XorShiftRng};
     use std::cell::RefCell;
 
     thread_local!(pub static THREAD_RNG: RefCell<XorShiftRng> = {

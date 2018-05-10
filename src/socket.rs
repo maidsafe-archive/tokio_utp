@@ -6,18 +6,18 @@ use packet::{self, Packet};
 
 //use mio::net::UdpSocket;
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Timeout, Handle, Remote, PollEvented};
+use tokio_core::reactor::{Handle, PollEvented, Remote, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
-use mio::{Registration, SetReadiness, Ready};
-use futures::{Async, AsyncSink, Future, Stream, Sink};
+use mio::{Ready, Registration, SetReadiness};
+use futures::{Async, AsyncSink, Future, Sink, Stream};
 use futures::sync::oneshot;
-use future_utils::mpsc::{self, UnboundedSender, UnboundedReceiver};
+use future_utils::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use void::Void;
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use slab::Slab;
 
-use std::{cmp, io, mem, u32, fmt};
+use std::{cmp, fmt, io, mem, u32};
 use std::sync::{Arc, RwLock};
 use std::net::SocketAddr;
 use std::collections::{HashMap, VecDeque};
@@ -50,7 +50,8 @@ pub struct UtpStream {
 
 impl fmt::Debug for UtpStream {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.debug_struct("UtpStream")
+        formatter
+            .debug_struct("UtpStream")
             .field("peer_addr", &self.peer_addr())
             .finish()
     }
@@ -141,7 +142,11 @@ impl Inner {
         socket: UdpSocket,
         listener_set_readiness: SetReadiness,
     ) -> InnerCell {
-        Arc::new(RwLock::new(Inner::new(handle, socket, listener_set_readiness)))
+        Arc::new(RwLock::new(Inner::new(
+            handle,
+            socket,
+            listener_set_readiness,
+        )))
     }
 }
 
@@ -203,7 +208,6 @@ struct Connection {
     average_sample_time: Instant,
     clock_drift: i32,
     slow_start: bool,
-
     // Artifical packet loss rate (for testing)
     // Probability of dropping is loss_rate / u32::MAX
     //#[cfg(test)]
@@ -326,7 +330,10 @@ impl UtpSocket {
         };
         let mut inner = unwrap!(self.inner.write());
         // NOTE: See the comments in RawReceiver::drop about removing this restriction
-        assert!(inner.raw_receiver.is_none(), "cannot have two raw receivers simultaneously");
+        assert!(
+            inner.raw_receiver.is_none(),
+            "cannot have two raw receivers simultaneously"
+        );
         inner.raw_receiver = Some(tx);
         ret
     }
@@ -445,14 +452,14 @@ impl Sink for RawChannel {
                     Ok(n) => {
                         assert_eq!(n, item.len());
                         Ok(AsyncSink::Ready)
-                    },
+                    }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                         self.registration.need_write();
                         Ok(AsyncSink::NotReady(item))
-                    },
+                    }
                     Err(e) => Err(e),
                 }
-            },
+            }
         }
     }
 
@@ -501,16 +508,14 @@ impl UtpListener {
                     self.registration.need_read();
                 }
                 Err(e)
-            },
+            }
             Ok(stream) => Ok(stream),
         }
     }
 
     /// Convert the `UtpListener` to a stream of incoming connections.
     pub fn incoming(self) -> Incoming {
-        Incoming {
-            listener: self,
-        }
+        Incoming { listener: self }
     }
 }
 
@@ -637,7 +642,8 @@ impl UtpStream {
     pub fn set_disconnect_timeout(&self, duration: Duration) {
         let mut inner = unwrap!(self.inner.write());
         let connection = &mut inner.connections[self.token];
-        connection.disconnect_timeout_secs = cmp::min(u32::MAX as u64, duration.as_secs()) as u32;
+        connection.disconnect_timeout_secs =
+            cmp::min(u64::from(u32::MAX), duration.as_secs()) as u32;
     }
 }
 
@@ -736,9 +742,7 @@ impl Inner {
                 conn.update_readiness()?;
                 Err(io::ErrorKind::WouldBlock.into())
             }
-            Err(e) => {
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -746,7 +750,10 @@ impl Inner {
     fn connect(&mut self, addr: &SocketAddr, inner: &InnerCell) -> io::Result<UtpStream> {
         if self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
             debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
-            return Err(io::Error::new(io::ErrorKind::Other, "socket has max connections"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "socket has max connections",
+            ));
         }
 
         // The peer establishing the connection picks the identifiers uses for
@@ -754,8 +761,8 @@ impl Inner {
         let (receive_id, mut send_id) = util::generate_sequential_identifiers();
 
         let mut key = Key {
-            receive_id: receive_id,
-            addr: addr.clone()
+            receive_id,
+            addr: *addr,
         };
 
         // Because the IDs are randomly generated, there could already be an
@@ -775,7 +782,10 @@ impl Inner {
         // Queue the syn packet
         out_queue.push(packet);
 
-        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
+        let handle = unwrap!(
+            self.remote.handle(),
+            "cannot be used outside of the event loop!"
+        );
         let (registration, set_readiness) = Registration::new2();
         let registration = PollEvented::new(registration, &handle)?;
         let now = Instant::now();
@@ -914,11 +924,7 @@ impl Inner {
         Ok(())
     }
 
-    fn process(&mut self,
-               bytes: BytesMut,
-               addr: SocketAddr,
-               inner: &InnerCell) -> io::Result<()>
-    {
+    fn process(&mut self, bytes: BytesMut, addr: SocketAddr, inner: &InnerCell) -> io::Result<()> {
         let packet = match Packet::parse(bytes) {
             Ok(packet) => packet,
             Err(bytes) => return self.process_raw(bytes, addr, inner),
@@ -927,7 +933,7 @@ impl Inner {
         match packet.ty() {
             packet::Type::Syn => {
                 // SYN packets are special
-                self.process_syn(packet, addr, inner)
+                self.process_syn(&packet, addr, inner)
             }
             _ => {
                 // All other packets are associated with a connection, and as
@@ -942,12 +948,12 @@ impl Inner {
                         };
 
                         if finalized {
-                            let _ = self.remove_connection(token);
+                            self.remove_connection(token);
                         }
 
                         Ok(())
                     }
-                    None => self.process_unknown(packet, addr, inner)
+                    None => self.process_unknown(packet, addr, inner),
                 }
             }
         }
@@ -972,11 +978,12 @@ impl Inner {
         self.process_raw(packet.into_bytes(), addr, inner)
     }
 
-    fn process_syn(&mut self,
-                   packet: Packet,
-                   addr: SocketAddr,
-                   inner: &InnerCell) -> io::Result<()>
-    {
+    fn process_syn(
+        &mut self,
+        packet: &Packet,
+        addr: SocketAddr,
+        inner: &InnerCell,
+    ) -> io::Result<()> {
         if !self.listener_open || self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
             debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
             // Send the RESET packet, ignoring errors...
@@ -1003,7 +1010,10 @@ impl Inner {
             return Ok(());
         }
 
-        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
+        let handle = unwrap!(
+            self.remote.handle(),
+            "cannot be used outside of the event loop!"
+        );
         let (registration, set_readiness) = Registration::new2();
         let registration = PollEvented::new(registration, &handle)?;
 
@@ -1051,14 +1061,15 @@ impl Inner {
         // Notify the listener
         self.listener.set_readiness(Ready::readable())?;
 
-        return Ok(());
+        Ok(())
     }
 
-    fn process_raw(&mut self,
-                   bytes: BytesMut,
-                   addr: SocketAddr,
-                   inner: &InnerCell) -> io::Result<()>
-    {
+    fn process_raw(
+        &mut self,
+        bytes: BytesMut,
+        addr: SocketAddr,
+        inner: &InnerCell,
+    ) -> io::Result<()> {
         if self.raw_data_buffered + bytes.len() > self.raw_data_max {
             return Ok(());
         }
@@ -1077,12 +1088,16 @@ impl Inner {
         Ok(())
     }
 
-    fn raw_channel(&mut self,
-                   addr: SocketAddr,
-                   inner: &InnerCell,
-                   data: Option<BytesMut>) -> io::Result<RawChannel>
-    {
-        let handle = unwrap!(self.remote.handle(), "cannot be used outside of the event loop!");
+    fn raw_channel(
+        &mut self,
+        addr: SocketAddr,
+        inner: &InnerCell,
+        data: Option<BytesMut>,
+    ) -> io::Result<RawChannel> {
+        let handle = unwrap!(
+            self.remote.handle(),
+            "cannot be used outside of the event loop!"
+        );
         let (registration, set_readiness) = Registration::new2();
         let registration = PollEvented::new(registration, &handle)?;
         let (tx, rx) = mpsc::unbounded();
@@ -1096,37 +1111,41 @@ impl Inner {
             registration: registration,
         };
         // NOTE: See the comments in RawChannel::drop about removing this restriction
-        assert!(self.raw_channels.insert(addr, (tx, set_readiness)).is_none(), "already have a raw channel for this address");
+        assert!(
+            self.raw_channels
+                .insert(addr, (tx, set_readiness))
+                .is_none(),
+            "already have a raw channel for this address"
+        );
         Ok(ret)
     }
 
     fn recv_from(&mut self) -> io::Result<(BytesMut, SocketAddr)> {
-        loop {
-            // Ensure the buffer has at least 4kb of available space.
-            self.in_buf.reserve(MIN_BUFFER_SIZE);
+        // Ensure the buffer has at least 4kb of available space.
+        self.in_buf.reserve(MIN_BUFFER_SIZE);
 
-            // Read in the bytes
-            let addr = unsafe {
-                let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
-                self.in_buf.advance_mut(n);
-                addr
-            };
+        // Read in the bytes
+        let addr = unsafe {
+            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+            self.in_buf.advance_mut(n);
+            addr
+        };
 
-            let bytes = self.in_buf.take();
+        let bytes = self.in_buf.take();
 
-            return Ok((bytes, addr));
-        }
+        Ok((bytes, addr))
     }
 
     fn flush_all(&mut self) -> io::Result<bool> {
-        if self.connection_lookup.len() == 0 {
+        if self.connection_lookup.is_empty() {
             return Ok(true);
         }
 
         // Iterate in semi-random order so that bandwidth is divided fairly between connections.
         let skip_point = util::rand::<usize>() % self.connection_lookup.len();
-        let tokens = self
-            .connection_lookup.values().skip(skip_point)
+        let tokens = self.connection_lookup
+            .values()
+            .skip(skip_point)
             .chain(self.connection_lookup.values().take(skip_point));
         for &token in tokens {
             let conn = &mut self.connections[token];
@@ -1145,14 +1164,18 @@ impl Inner {
     fn remove_connection(&mut self, token: usize) {
         let connection = self.connections.remove(token);
         self.connection_lookup.remove(&connection.key);
-        trace!("removing connection state; token={:?}, addr={:?}; id={:?}",
-               token, connection.key.addr, connection.key.receive_id);
+        trace!(
+            "removing connection state; token={:?}, addr={:?}; id={:?}",
+            token,
+            connection.key.addr,
+            connection.key.receive_id
+        );
     }
 }
 
 impl Shared {
     fn update_ready(&mut self, ready: Ready) {
-        self.ready = self.ready | ready;
+        self.ready |= ready;
     }
 
     fn is_writable(&self) -> bool {
@@ -1166,7 +1189,8 @@ impl Shared {
 
 impl Connection {
     fn update_local_window(&mut self) {
-        self.out_queue.set_local_window(self.in_queue.local_window());
+        self.out_queue
+            .set_local_window(self.in_queue.local_window());
     }
 
     /// Process an inbound packet for the connection
@@ -1232,15 +1256,15 @@ impl Connection {
                 packet::Type::Fin => {
                     self.read_open = false;
                 }
-                packet::Type::Data |
-                    packet::Type::Syn |
-                    packet::Type::State => unreachable!(),
+                packet::Type::Data | packet::Type::Syn | packet::Type::State => unreachable!(),
             }
         }
 
-        trace!("updating local window, acks; window={:?}; ack={:?}",
-               self.in_queue.local_window(),
-               self.in_queue.ack_nr());
+        trace!(
+            "updating local window, acks; window={:?}; ack={:?}",
+            self.in_queue.local_window(),
+            self.in_queue.ack_nr()
+        );
 
         self.update_local_window();
         let (ack_nr, selective_acks) = self.in_queue.ack_nr();
@@ -1271,7 +1295,11 @@ impl Connection {
                 return Ok(false);
             }
 
-            trace!("send_to; addr={:?}; packet={:?}", self.key.addr, next.packet());
+            trace!(
+                "send_to; addr={:?}; packet={:?}",
+                self.key.addr,
+                next.packet()
+            );
 
             // We randomly drop packets when testing.
             //#[cfg(test)]
@@ -1283,7 +1311,10 @@ impl Connection {
                 next.sent();
                 sent = true;
             } else {
-                match shared.socket.send_to(next.packet().as_slice(), &self.key.addr) {
+                match shared
+                    .socket
+                    .send_to(next.packet().as_slice(), &self.key.addr)
+                {
                     Ok(n) => {
                         assert_eq!(n, next.packet().as_slice().len());
                         next.sent();
@@ -1315,7 +1346,7 @@ impl Connection {
         }
 
         let now = Instant::now();
-        if now > self.last_recv_time + Duration::new(self.disconnect_timeout_secs as u64, 0) {
+        if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
             // Send the RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(self.out_queue.connection_id());
@@ -1328,7 +1359,10 @@ impl Connection {
 
         if let Some(deadline) = self.deadline {
             if now >= deadline {
-                trace!("connection timed out; id={}", self.out_queue.connection_id());
+                trace!(
+                    "connection timed out; id={}",
+                    self.out_queue.connection_id()
+                );
                 self.out_queue.timed_out();
                 self.flush(shared)?;
             }
@@ -1376,9 +1410,9 @@ impl Connection {
                 let dist_up = actual_delay.wrapping_sub(self.average_delay_base);
 
                 if dist_down > dist_up {
-                    average_delay_sample = dist_up as i64;
+                    average_delay_sample = i64::from(dist_up);
                 } else {
-                    average_delay_sample = -(dist_down as i64);
+                    average_delay_sample = -i64::from(dist_down);
                 }
 
                 self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
@@ -1386,7 +1420,8 @@ impl Connection {
 
                 if now > self.average_sample_time {
                     let mut prev_average_delay = self.average_delay;
-                    self.average_delay = (self.current_delay_sum / self.current_delay_samples) as i32;
+                    self.average_delay =
+                        (self.current_delay_sum / self.current_delay_samples) as i32;
                     self.average_sample_time = now + Duration::from_secs(5);
 
                     self.current_delay_sum = 0;
@@ -1402,25 +1437,25 @@ impl Connection {
                     } else if max_sample < 0 {
                         let adjust = -max_sample;
 
-                        self.average_delay_base = self.average_delay_base.saturating_sub(adjust as u32);
+                        self.average_delay_base =
+                            self.average_delay_base.saturating_sub(adjust as u32);
                         self.average_delay += adjust;
                         prev_average_delay += adjust;
                     }
 
                     // Update the clock drive estimate
-                    let drift = self.average_delay as i64 - prev_average_delay as i64;
+                    let drift = i64::from(self.average_delay) - i64::from(prev_average_delay);
 
-                    self.clock_drift = ((self.clock_drift as i64 * 7 + drift) / 8) as i32;
+                    self.clock_drift = ((i64::from(self.clock_drift) * 7 + drift) / 8) as i32;
                 }
             }
         }
 
         // Ack all packets
-        if let Some((acked_bytes, min_rtt)) = self.out_queue.set_their_ack(
-            packet.ack_nr(),
-            packet.selective_acks(),
-            now,
-        ) {
+        if let Some((acked_bytes, min_rtt)) =
+            self.out_queue
+                .set_their_ack(packet.ack_nr(), &packet.selective_acks(), now)
+        {
             let min_rtt = util::as_wrapping_micros(min_rtt);
 
             if let Some(delay) = self.our_delays.get() {
@@ -1435,14 +1470,19 @@ impl Connection {
         }
     }
 
-    fn apply_congestion_control(&mut self,
-                                bytes_acked: usize,
-                                actual_delay: u32,
-                                min_rtt: u32,
-                                now: Instant)
-    {
-        trace!("applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
-               bytes_acked, actual_delay, min_rtt);
+    fn apply_congestion_control(
+        &mut self,
+        bytes_acked: usize,
+        actual_delay: u32,
+        min_rtt: u32,
+        now: Instant,
+    ) {
+        trace!(
+            "applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
+            bytes_acked,
+            actual_delay,
+            min_rtt
+        );
 
         let target = TARGET_DELAY;
 
@@ -1459,14 +1499,12 @@ impl Connection {
             }
         }
 
-        let off_target = ((target as i64) - (our_delay as i64)) as f64;
+        let off_target = (i64::from(target) - i64::from(our_delay)) as f64;
         let window_factor =
-            cmp::min(bytes_acked, max_window) as f64 /
-            cmp::max(max_window, bytes_acked) as f64;
+            cmp::min(bytes_acked, max_window) as f64 / cmp::max(max_window, bytes_acked) as f64;
 
-        let delay_factor = off_target / target as f64;
-        let mut scaled_gain = MAX_CWND_INCREASE_BYTES_PER_RTT as f64 *
-            window_factor * delay_factor;
+        let delay_factor = off_target / f64::from(target);
+        let mut scaled_gain = MAX_CWND_INCREASE_BYTES_PER_RTT as f64 * window_factor * delay_factor;
 
         if scaled_gain > 0.0 && now - self.last_maxed_out_window > Duration::from_secs(1) {
             // if it was more than 1 second since we tried to send a packet and
@@ -1486,14 +1524,13 @@ impl Connection {
         if self.slow_start {
             let ss_cwnd = max_window + window_factor as usize * MAX_DATA_SIZE;
 
-            if ss_cwnd > SLOW_START_THRESHOLD {
-                self.slow_start = false;
-            } else if our_delay > (target as f64 * 0.9) as u32 {
+            if ss_cwnd > SLOW_START_THRESHOLD || our_delay > (f64::from(target) * 0.9) as u32 {
                 // Even if we're a little under the target delay, we
                 // conservatively discontinue the slow start phase
                 self.slow_start = false;
             } else {
-                self.out_queue.set_max_window(cmp::max(ss_cwnd, ledbat_cwnd) as u32);
+                self.out_queue
+                    .set_max_window(cmp::max(ss_cwnd, ledbat_cwnd) as u32);
             }
         } else {
             self.out_queue.set_max_window(ledbat_cwnd as u32);
@@ -1501,17 +1538,15 @@ impl Connection {
     }
 
     fn reset_timeout(&mut self) {
-        self.deadline = self.out_queue.socket_timeout()
-            .map(|dur| {
-                trace!("resetting timeout; duration={:?}", dur);
-                Instant::now() + dur
-            });
+        self.deadline = self.out_queue.socket_timeout().map(|dur| {
+            trace!("resetting timeout; duration={:?}", dur);
+            Instant::now() + dur
+        });
     }
 
     fn is_finalized(&self) -> bool {
-        self.released &&
-            ((self.out_queue.is_empty() && self.state.is_closed()) ||
-             self.state == State::Reset)
+        self.released
+            && ((self.out_queue.is_empty() && self.state.is_closed()) || self.state == State::Reset)
     }
 
     /// Update the UtpStream's readiness
@@ -1582,16 +1617,12 @@ impl Future for UtpStreamConnect {
     fn poll(&mut self) -> io::Result<Async<UtpStream>> {
         let inner = mem::replace(&mut self.state, UtpStreamConnectState::Empty);
         match inner {
-            UtpStreamConnectState::Waiting(stream) => {
-                match stream.registration.poll_write() {
-                    Async::NotReady => {
-                        mem::replace(&mut self.state, UtpStreamConnectState::Waiting(stream));
-                        Ok(Async::NotReady)
-                    },
-                    Async::Ready(()) => {
-                        Ok(Async::Ready(stream))
-                    },
+            UtpStreamConnectState::Waiting(stream) => match stream.registration.poll_write() {
+                Async::NotReady => {
+                    mem::replace(&mut self.state, UtpStreamConnectState::Waiting(stream));
+                    Ok(Async::NotReady)
                 }
+                Async::Ready(()) => Ok(Async::Ready(stream)),
             },
             UtpStreamConnectState::Err(e) => Err(e),
             UtpStreamConnectState::Empty => panic!("can't poll UtpStreamConnect twice!"),
@@ -1619,15 +1650,10 @@ impl Future for SocketRefresher {
 
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
-        loop {
-            match self.timeout.poll()? {
-                Async::Ready(()) => {
-                    unwrap!(self.inner.write()).tick()?;
-                    self.next_tick += Duration::from_millis(500);
-                    self.timeout.reset(self.next_tick);
-                },
-                Async::NotReady => break,
-            }
+        while let Async::Ready(()) = self.timeout.poll()? {
+            unwrap!(self.inner.write()).tick()?;
+            self.next_tick += Duration::from_millis(500);
+            self.timeout.reset(self.next_tick);
         }
 
         if let Async::Ready(true) = unwrap!(self.inner.write()).refresh(&self.inner)? {
@@ -1693,7 +1719,7 @@ impl io::Write for UtpStream {
     }
 }
 
-impl AsyncRead for UtpStream { }
+impl AsyncRead for UtpStream {}
 
 impl AsyncWrite for UtpStream {
     fn shutdown(&mut self) -> io::Result<Async<()>> {
@@ -1718,7 +1744,7 @@ mod tests {
             /// Returns future that yields received packet and listener address.
             fn wait_for_packet(handle: &Handle) -> (oneshot::Receiver<Packet>, SocketAddr) {
                 let (packet_tx, packet_rx) = oneshot::channel();
-                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), handle));
                 let listener_addr = unwrap!(listener.local_addr());
                 let recv_response = listener
                     .recv_dgram(vec![0u8; 256])
@@ -1727,7 +1753,7 @@ mod tests {
                     })
                     .and_then(move |buff| {
                         let packet = unwrap!(Packet::parse(buff));
-                        let _ = unwrap!(packet_tx.send(packet));
+                        unwrap!(packet_tx.send(packet));
                         Ok(())
                     })
                     .then(|_| Ok(()));
@@ -1746,14 +1772,12 @@ mod tests {
 
                 let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
                 let mut packet = Packet::syn();
-                packet.set_connection_id(12345);
+                packet.set_connection_id(12_345);
 
-                let _ = unwrap!(
-                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
-                );
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 
                 let packet = unwrap!(evloop.run(packet_rx));
-                assert!(packet.connection_id() == 12345);
+                assert!(packet.connection_id() == 12_345);
                 assert!(packet.ty() == packet::Type::Reset);
             }
 
@@ -1768,11 +1792,9 @@ mod tests {
 
                 let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
                 let mut packet = Packet::reset();
-                packet.set_connection_id(12345);
+                packet.set_connection_id(12_345);
 
-                let _ = unwrap!(
-                    unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner)
-                );
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, remote_peer_addr, &inner));
 
                 let wait_for_response = packet_rx
                     .with_timeout(Duration::from_secs(1), &handle)
