@@ -979,12 +979,8 @@ impl Inner {
         trace!("no connection associated with ID; treating as raw data");
 
         if packet.ty() != packet::Type::Reset {
-            // Send a RESET packet, ignoring errors...
-            let mut p = Packet::reset();
-            p.set_connection_id(packet.connection_id());
-            let _ = self.reset_packets.push_back((p, addr));
+            self.schedule_reset(packet.connection_id(), addr);
         }
-
         self.process_raw(packet.into_bytes(), addr, inner)
     }
 
@@ -996,11 +992,7 @@ impl Inner {
     ) -> io::Result<()> {
         if !self.listener_open || self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
             debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
-            // Send the RESET packet, ignoring errors...
-            let mut p = Packet::reset();
-            p.set_connection_id(packet.connection_id());
-            let _ = self.reset_packets.push_back((p, addr));
-
+            self.schedule_reset(packet.connection_id(), addr);
             return Ok(());
         }
 
@@ -1164,6 +1156,14 @@ impl Inner {
             }
         }
         Ok(true)
+    }
+
+    /// Enqueues Reset packet with given information.
+    fn schedule_reset(&mut self, conn_id: u16, dest_addr: SocketAddr) {
+        // Send the RESET packet, ignoring errors...
+        let mut p = Packet::reset();
+        p.set_connection_id(conn_id);
+        let _ = self.reset_packets.push_back((p, dest_addr));
     }
 
     /// Attempts to send enqueued Reset packets.
@@ -1379,12 +1379,7 @@ impl Connection {
 
         let now = Instant::now();
         if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
-            let mut p = Packet::reset();
-            p.set_connection_id(self.out_queue.connection_id());
-            let _ = unwrap!(inner.write())
-                .reset_packets
-                .push_back((p, self.key.addr));
-
+            unwrap!(inner.write()).schedule_reset(self.out_queue.connection_id(), self.key.addr);
             self.state = State::Reset;
             self.update_readiness()?;
             return Ok(());
