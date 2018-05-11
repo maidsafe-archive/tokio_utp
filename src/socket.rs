@@ -922,10 +922,13 @@ impl Inner {
         }
     }
 
-    fn tick(&mut self) -> io::Result<()> {
+    // Note, it looks hairy to me that inner instance has to be passed to the method of Inner.
+    // I just copied this pattern fromm `Inner::refresh()`. But probably this should be reworked,
+    // if possible.
+    fn tick(&mut self, inner: &InnerCell) -> io::Result<()> {
         trace!("Socket::tick");
         for &idx in self.connection_lookup.values() {
-            self.connections[idx].tick(&mut self.shared)?;
+            self.connections[idx].tick(&mut self.shared, inner)?;
         }
 
         Ok(())
@@ -979,7 +982,7 @@ impl Inner {
             // Send a RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(packet.connection_id());
-            let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+            let _ = self.reset_packets.push_back((p, addr));
         }
 
         self.process_raw(packet.into_bytes(), addr, inner)
@@ -996,8 +999,7 @@ impl Inner {
             // Send the RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(packet.connection_id());
-
-            let _ = self.shared.socket.send_to(p.as_slice(), &addr);
+            let _ = self.reset_packets.push_back((p, addr));
 
             return Ok(());
         }
@@ -1174,7 +1176,7 @@ impl Inner {
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     self.shared.need_writable();
-                    self.reset_packets.push_back((packet, dest_addr));
+                    let _ = self.reset_packets.push_back((packet, dest_addr));
                     return Ok(Async::NotReady);
                 }
                 Err(e) => {
@@ -1370,18 +1372,19 @@ impl Connection {
         Ok(true)
     }
 
-    fn tick(&mut self, shared: &mut Shared) -> io::Result<()> {
+    fn tick(&mut self, shared: &mut Shared, inner: &InnerCell) -> io::Result<()> {
         if self.state == State::Reset {
             return Ok(());
         }
 
         let now = Instant::now();
         if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
-            // Send the RESET packet, ignoring errors...
             let mut p = Packet::reset();
             p.set_connection_id(self.out_queue.connection_id());
+            let _ = unwrap!(inner.write())
+                .reset_packets
+                .push_back((p, self.key.addr));
 
-            let _ = shared.socket.send_to(p.as_slice(), &self.key.addr);
             self.state = State::Reset;
             self.update_readiness()?;
             return Ok(());
@@ -1681,7 +1684,7 @@ impl Future for SocketRefresher {
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
         while let Async::Ready(()) = self.timeout.poll()? {
-            unwrap!(self.inner.write()).tick()?;
+            unwrap!(self.inner.write()).tick(&self.inner)?;
             self.next_tick += Duration::from_millis(500);
             self.timeout.reset(self.next_tick);
         }
@@ -1794,90 +1797,45 @@ mod tests {
 
         mod process_unknown {
             use super::*;
-            use future_utils::FutureExt;
-
-            /// Creates new UDP socket and waits for incoming uTP packets.
-            /// Returns future that yields received packet and listener address.
-            fn wait_for_packet(handle: &Handle) -> (oneshot::Receiver<Packet>, SocketAddr) {
-                let (packet_tx, packet_rx) = oneshot::channel();
-                let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), handle));
-                let listener_addr = unwrap!(listener.local_addr());
-                let recv_response = listener
-                    .recv_dgram(vec![0u8; 256])
-                    .map(move |(_sock, buff, bytes_received, _addr)| {
-                        BytesMut::from(&buff[..bytes_received])
-                    })
-                    .and_then(move |buff| {
-                        let packet = unwrap!(Packet::parse(buff));
-                        unwrap!(packet_tx.send(packet));
-                        Ok(())
-                    })
-                    .then(|_| Ok(()));
-                handle.spawn(recv_response);
-                (packet_rx, listener_addr)
-            }
 
             #[test]
-            fn when_packet_is_syn_it_sends_reset_back() {
-                let mut evloop = unwrap!(Core::new());
+            fn when_packet_is_syn_it_schedules_reset_back() {
+                let evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
 
-                let task = future::lazy(|| {
-                    let (_listener_registration, listener_set_readiness) = Registration::new2();
-                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
 
-                    let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
-                    let mut packet = Packet::syn();
-                    packet.set_connection_id(12_345);
+                let mut packet = Packet::syn();
+                packet.set_connection_id(12_345);
+                let peer_addr = addr!("1.2.3.4:5000");
 
-                    unwrap!(unwrap!(inner.write()).process_unknown(
-                        packet,
-                        remote_peer_addr,
-                        &inner
-                    ));
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, peer_addr, &inner));
 
-                    packet_rx.map(move |packet| {
-                        drop(inner);
-                        packet
-                    })
-                });
-                let packet = unwrap!(evloop.run(task));
-
-                assert!(packet.connection_id() == 12_345);
-                assert!(packet.ty() == packet::Type::Reset);
+                let packet_opt = unwrap!(inner.write()).reset_packets.pop_front();
+                let (packet, dest_addr) = unwrap!(packet_opt);
+                assert_eq!(packet.connection_id(), 12_345);
+                assert_eq!(packet.ty(), packet::Type::Reset);
+                assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
             }
 
             #[test]
             fn when_packet_is_reset_nothing_is_sent_back() {
-                let mut evloop = unwrap!(Core::new());
+                let evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
 
-                let task = future::lazy(|| {
-                    let (_listener_registration, listener_set_readiness) = Registration::new2();
-                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
 
-                    let (packet_rx, remote_peer_addr) = wait_for_packet(&handle);
-                    let mut packet = Packet::reset();
-                    packet.set_connection_id(12_345);
+                let mut packet = Packet::reset();
+                packet.set_connection_id(12_345);
+                let peer_addr = addr!("1.2.3.4:5000");
 
-                    unwrap!(unwrap!(inner.write()).process_unknown(
-                        packet,
-                        remote_peer_addr,
-                        &inner
-                    ));
+                unwrap!(unwrap!(inner.write()).process_unknown(packet, peer_addr, &inner));
 
-                    packet_rx
-                        .with_timeout(Duration::from_secs(1), &handle)
-                        .map(move |res_opt| {
-                            drop(inner);
-                            res_opt.is_none()
-                        })
-                });
-
-                let response_timedout = unwrap!(evloop.run(task));
-                assert!(response_timedout);
+                assert!(unwrap!(inner.write()).reset_packets.is_empty());
             }
         }
 
@@ -1920,6 +1878,33 @@ mod tests {
 
                 let packet_ids: Vec<u16> = packets.iter().map(|p| p.connection_id()).collect();
                 assert_that!(&packet_ids, contains(vec![12_345, 23_456]).exactly());
+            }
+        }
+
+        mod process_syn {
+            use super::*;
+
+            #[test]
+            fn when_listener_is_closed_it_schedules_reset_packet_back() {
+                let evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+                let (_listener_registration, listener_set_readiness) = Registration::new2();
+
+                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                unwrap!(inner.write()).listener_open = false;
+
+                let mut packet = Packet::syn();
+                packet.set_connection_id(12_345);
+                let peer_addr = addr!("1.2.3.4:5000");
+
+                unwrap!(unwrap!(inner.write()).process_syn(&packet, peer_addr, &inner));
+
+                let packet_opt = unwrap!(inner.write()).reset_packets.pop_front();
+                let (packet, dest_addr) = unwrap!(packet_opt);
+                assert_eq!(packet.connection_id(), 12_345);
+                assert_eq!(packet.ty(), packet::Type::Reset);
+                assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
             }
         }
     }
