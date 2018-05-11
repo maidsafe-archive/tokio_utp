@@ -777,49 +777,14 @@ impl Inner {
             send_id += 1;
         }
 
-        // SYN packet has seq_nr of 1
-        let mut out_queue = OutQueue::new(send_id, 0, None);
-
-        let mut packet = Packet::syn();
-        packet.set_connection_id(key.receive_id);
-
-        // Queue the syn packet
-        out_queue.push(packet);
-
         let handle = unwrap!(
             self.remote.handle(),
             "cannot be used outside of the event loop!"
         );
         let (registration, set_readiness) = Registration::new2();
         let registration = PollEvented::new(registration, &handle)?;
-        let now = Instant::now();
 
-        let mut connection = Connection {
-            state: State::SynSent,
-            key: key.clone(),
-            set_readiness: set_readiness,
-            out_queue: out_queue,
-            in_queue: InQueue::new(None),
-            our_delays: Delays::new(),
-            their_delays: Delays::new(),
-            released: false,
-            write_open: true,
-            read_open: true,
-            deadline: Some(now + Duration::from_millis(DEFAULT_TIMEOUT_MS)),
-            last_recv_time: now,
-            disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
-            last_maxed_out_window: now,
-            average_delay: 0,
-            current_delay_sum: 0,
-            current_delay_samples: 0,
-            average_delay_base: 0,
-            average_sample_time: now,
-            clock_drift: 0,
-            slow_start: true,
-            //#[cfg(test)]
-            //loss_rate: 0,
-        };
-
+        let mut connection = Connection::new_outgoing(key.clone(), set_readiness, send_id);
         connection.flush(&mut self.shared)?;
 
         let token = self.connections.insert(connection);
@@ -994,15 +959,9 @@ impl Inner {
             return Ok(());
         }
 
-        let seq_nr = util::rand();
-        let ack_nr = packet.seq_nr();
         let send_id = packet.connection_id();
         let receive_id = send_id + 1;
-
-        let key = Key {
-            receive_id: receive_id,
-            addr: addr,
-        };
+        let key = Key { receive_id, addr };
 
         if self.connection_lookup.contains_key(&key) {
             // Just ignore the packet...
@@ -1016,34 +975,8 @@ impl Inner {
         let (registration, set_readiness) = Registration::new2();
         let registration = PollEvented::new(registration, &handle)?;
 
-        let now = Instant::now();
-
-        let mut connection = Connection {
-            state: State::SynRecv,
-            key: key.clone(),
-            set_readiness: set_readiness,
-            out_queue: OutQueue::new(send_id, seq_nr, Some(ack_nr)),
-            in_queue: InQueue::new(Some(ack_nr)),
-            released: false,
-            write_open: true,
-            read_open: true,
-            our_delays: Delays::new(),
-            their_delays: Delays::new(),
-            deadline: None,
-            last_recv_time: now,
-            disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
-            last_maxed_out_window: now,
-            average_delay: 0,
-            current_delay_sum: 0,
-            current_delay_samples: 0,
-            average_delay_base: 0,
-            average_sample_time: now,
-            clock_drift: 0,
-            slow_start: true,
-            //#[cfg(test)]
-            //loss_rate: 0,
-        };
-
+        let mut connection =
+            Connection::new_incoming(key.clone(), set_readiness, send_id, packet.seq_nr());
         // This will handle the state packet being sent
         connection.flush(&mut self.shared)?;
 
@@ -1217,6 +1150,79 @@ impl Shared {
 }
 
 impl Connection {
+    fn new(
+        state: State,
+        key: Key,
+        set_readiness: SetReadiness,
+        out_queue: OutQueue,
+        in_queue: InQueue,
+        deadline_after: Option<u64>,
+    ) -> Self {
+        let now = Instant::now();
+        let deadline = deadline_after.map(|millis| now + Duration::from_millis(millis));
+        Self {
+            state,
+            key,
+            set_readiness,
+            out_queue,
+            in_queue,
+            our_delays: Delays::new(),
+            their_delays: Delays::new(),
+            released: false,
+            write_open: true,
+            read_open: true,
+            deadline,
+            last_recv_time: now,
+            disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
+            last_maxed_out_window: now,
+            average_delay: 0,
+            current_delay_sum: 0,
+            current_delay_samples: 0,
+            average_delay_base: 0,
+            average_sample_time: now,
+            clock_drift: 0,
+            slow_start: true,
+            //#[cfg(test)]
+            //loss_rate: 0,
+        }
+    }
+
+    /// Constructs new connection that we initiated with `UtpSocket::connect()`.
+    fn new_outgoing(key: Key, set_readiness: SetReadiness, send_id: u16) -> Self {
+        // SYN packet has seq_nr of 1
+        let mut out_queue = OutQueue::new(send_id, 0, None);
+
+        let mut packet = Packet::syn();
+        packet.set_connection_id(key.receive_id);
+
+        // Queue the syn packet
+        out_queue.push(packet);
+
+        Self::new(
+            State::SynSent,
+            key,
+            set_readiness,
+            out_queue,
+            InQueue::new(None),
+            Some(DEFAULT_TIMEOUT_MS),
+        )
+    }
+
+    /// Constructs new incoming connection from Syn packet.
+    fn new_incoming(key: Key, set_readiness: SetReadiness, send_id: u16, ack_nr: u16) -> Self {
+        let seq_nr = util::rand();
+        let out_queue = OutQueue::new(send_id, seq_nr, Some(ack_nr));
+        let in_queue = InQueue::new(Some(ack_nr));
+        Self::new(
+            State::SynRecv,
+            key,
+            set_readiness,
+            out_queue,
+            in_queue,
+            None,
+        )
+    }
+
     fn update_local_window(&mut self) {
         self.out_queue
             .set_local_window(self.in_queue.local_window());
