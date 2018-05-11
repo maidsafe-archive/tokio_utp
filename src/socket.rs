@@ -5,6 +5,7 @@ use out_queue::OutQueue;
 use packet::{self, Packet};
 
 //use mio::net::UdpSocket;
+use arraydeque::ArrayDeque;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented, Remote, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -108,6 +109,10 @@ struct Inner {
 
     listener_open: bool,
 
+    // Reset packets to be sent. These packets are not associated with any connection. They
+    // don't need to be acknowledged either.
+    reset_packets: ArrayDeque<[(Packet, SocketAddr); MAX_CONNECTIONS_PER_SOCKET]>,
+
     raw_data_max: usize,
     raw_data_buffered: usize,
     raw_receiver: Option<UnboundedSender<RawChannel>>,
@@ -130,6 +135,7 @@ impl Inner {
             accept_buf: VecDeque::new(),
             listener: listener_set_readiness,
             listener_open: true,
+            reset_packets: ArrayDeque::new(),
             raw_data_max: DEFAULT_RAW_DATA_MAX,
             raw_data_buffered: 0,
             raw_receiver: None,
@@ -897,6 +903,7 @@ impl Inner {
                 set_readiness.set_readiness(ready)?;
             }
         }
+        let _ = self.flush_reset_packets()?;
         Ok(self.connection_lookup.is_empty())
     }
 
@@ -1155,6 +1162,27 @@ impl Inner {
             }
         }
         Ok(true)
+    }
+
+    /// Attempts to send enqueued Reset packets.
+    fn flush_reset_packets(&mut self) -> Result<Async<()>, io::Error> {
+        while let Some((packet, dest_addr)) = self.reset_packets.pop_front() {
+            match self.shared.socket.send_to(packet.as_slice(), &dest_addr) {
+                Ok(n) => {
+                    // should never fail!
+                    assert_eq!(n, packet.as_slice().len());
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.shared.need_writable();
+                    self.reset_packets.push_back((packet, dest_addr));
+                    return Ok(Async::NotReady);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(Async::Ready(()))
     }
 
     fn flush(&mut self, token: usize) -> io::Result<bool> {
@@ -1736,12 +1764,37 @@ mod tests {
 
     mod inner {
         use super::*;
+        use futures::future::{self, Loop};
+        use futures::sync::mpsc;
+        use tokio_core::reactor::Core;
+
+        /// Creates new UDP socket and waits for incoming uTP packets.
+        /// Returns future that yields received packet and listener address.
+        fn wait_for_packets(handle: &Handle) -> (mpsc::UnboundedReceiver<Packet>, SocketAddr) {
+            let (packets_tx, packets_rx) = mpsc::unbounded();
+            let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), handle));
+            let listener_addr = unwrap!(listener.local_addr());
+
+            let recv_response =
+                future::loop_fn((listener, packets_tx), |(listener, packets_tx)| {
+                    listener.recv_dgram(vec![0u8; 256]).map(
+                        move |(listener, buff, bytes_received, _addr)| {
+                            let buff = BytesMut::from(&buff[..bytes_received]);
+                            let packet = unwrap!(Packet::parse(buff));
+                            unwrap!(packets_tx.unbounded_send(packet));
+                            Loop::Continue((listener, packets_tx))
+                        },
+                    )
+                }).map_err(|e| panic!(e))
+                    .then(|_res: Result<(), _>| Ok(()));
+            handle.spawn(recv_response);
+
+            (packets_rx, listener_addr)
+        }
 
         mod process_unknown {
             use super::*;
-            use futures::future;
             use future_utils::FutureExt;
-            use tokio_core::reactor::Core;
 
             /// Creates new UDP socket and waits for incoming uTP packets.
             /// Returns future that yields received packet and listener address.
@@ -1825,6 +1878,48 @@ mod tests {
 
                 let response_timedout = unwrap!(evloop.run(task));
                 assert!(response_timedout);
+            }
+        }
+
+        mod flush_reset_packets {
+            use super::*;
+            use hamcrest::prelude::*;
+
+            #[test]
+            fn it_attempts_to_send_all_queued_reset_packets() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+
+                let task = future::lazy(|| {
+                    let (_listener_registration, listener_set_readiness) = Registration::new2();
+                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+
+                    let (packets_rx, remote_peer_addr) = wait_for_packets(&handle);
+
+                    let mut packet = Packet::reset();
+                    packet.set_connection_id(12_345);
+                    unwrap!(
+                        unwrap!(inner.write())
+                            .reset_packets
+                            .push_back((packet, remote_peer_addr))
+                    );
+                    let mut packet = Packet::reset();
+                    packet.set_connection_id(23_456);
+                    unwrap!(
+                        unwrap!(inner.write())
+                            .reset_packets
+                            .push_back((packet, remote_peer_addr))
+                    );
+
+                    // keep retrying until all packets are sent out
+                    future::poll_fn(move || unwrap!(inner.write()).flush_reset_packets())
+                        .and_then(move |_| packets_rx.take(2).collect().map_err(|e| panic!(e)))
+                });
+                let packets = unwrap!(evloop.run(task));
+
+                let packet_ids: Vec<u16> = packets.iter().map(|p| p.connection_id()).collect();
+                assert_that!(&packet_ids, contains(vec![12_345, 23_456]).exactly());
             }
         }
     }

@@ -1,7 +1,11 @@
+extern crate arraydeque;
 extern crate byteorder;
 extern crate bytes;
 extern crate future_utils;
 extern crate futures;
+#[cfg(test)]
+#[macro_use]
+extern crate hamcrest;
 extern crate mio;
 #[cfg(test)]
 #[macro_use]
