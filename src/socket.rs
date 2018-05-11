@@ -121,41 +121,6 @@ struct Inner {
 
 type InnerCell = Arc<RwLock<Inner>>;
 
-impl Inner {
-    fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
-        Inner {
-            shared: Shared {
-                socket: socket,
-                ready: Ready::empty(),
-            },
-            remote: handle.remote().clone(),
-            connections: Slab::new(),
-            connection_lookup: HashMap::new(),
-            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
-            accept_buf: VecDeque::new(),
-            listener: listener_set_readiness,
-            listener_open: true,
-            reset_packets: ArrayDeque::new(),
-            raw_data_max: DEFAULT_RAW_DATA_MAX,
-            raw_data_buffered: 0,
-            raw_receiver: None,
-            raw_channels: HashMap::new(),
-        }
-    }
-
-    fn new_shared(
-        handle: &Handle,
-        socket: UdpSocket,
-        listener_set_readiness: SetReadiness,
-    ) -> InnerCell {
-        Arc::new(RwLock::new(Inner::new(
-            handle,
-            socket,
-            listener_set_readiness,
-        )))
-    }
-}
-
 unsafe impl Send for Inner {}
 
 struct Shared {
@@ -703,6 +668,39 @@ impl Evented for UtpStream {
 */
 
 impl Inner {
+    fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
+        Inner {
+            shared: Shared {
+                socket: socket,
+                ready: Ready::empty(),
+            },
+            remote: handle.remote().clone(),
+            connections: Slab::new(),
+            connection_lookup: HashMap::new(),
+            in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
+            accept_buf: VecDeque::new(),
+            listener: listener_set_readiness,
+            listener_open: true,
+            reset_packets: ArrayDeque::new(),
+            raw_data_max: DEFAULT_RAW_DATA_MAX,
+            raw_data_buffered: 0,
+            raw_receiver: None,
+            raw_channels: HashMap::new(),
+        }
+    }
+
+    fn new_shared(
+        handle: &Handle,
+        socket: UdpSocket,
+        listener_set_readiness: SetReadiness,
+    ) -> InnerCell {
+        Arc::new(RwLock::new(Inner::new(
+            handle,
+            socket,
+            listener_set_readiness,
+        )))
+    }
+
     fn accept(&mut self) -> io::Result<UtpStream> {
         match self.accept_buf.pop_front() {
             Some(socket) => {
