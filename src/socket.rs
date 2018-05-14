@@ -801,6 +801,7 @@ impl Inner {
         conn.write_open = false;
         if !conn.state.is_closed() {
             conn.out_queue.push(Packet::fin());
+            conn.state = State::FinSent;
             conn.flush(&mut self.shared)?;
         }
         Ok(())
@@ -1915,6 +1916,36 @@ mod tests {
                 assert_eq!(packet.connection_id(), 12_345);
                 assert_eq!(packet.ty(), packet::Type::Reset);
                 assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
+            }
+        }
+
+        fn make_socket_inner(evloop: &Core) -> Inner {
+            let handle = evloop.handle();
+            let (_listener_registration, listener_set_readiness) = Registration::new2();
+            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+            Inner::new(&handle, socket, listener_set_readiness)
+        }
+
+        mod shutdown_write {
+            use super::*;
+
+            #[test]
+            fn it_changes_connection_state_to_fin_sent() {
+                let evloop = unwrap!(Core::new());
+                let mut inner = make_socket_inner(&evloop);
+
+                let key = Key {
+                    receive_id: 12_345,
+                    addr: addr!("1.2.3.4:5000"),
+                };
+                let (_registration, set_readiness) = Registration::new2();
+                let conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                let conn_token = inner.connections.insert(conn);
+
+                unwrap!(inner.shutdown_write(conn_token));
+
+                let conn = &inner.connections[conn_token];
+                assert_eq!(conn.state, State::FinSent);
             }
         }
     }
