@@ -1806,17 +1806,21 @@ mod tests {
             (packets_rx, listener_addr)
         }
 
+        /// Reduce some boilerplate
+        fn make_socket_inner(evloop: &Core) -> InnerCell {
+            let handle = evloop.handle();
+            let (_listener_registration, listener_set_readiness) = Registration::new2();
+            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+            Inner::new_shared(&handle, socket, listener_set_readiness)
+        }
+
         mod process_unknown {
             use super::*;
 
             #[test]
             fn when_packet_is_syn_it_schedules_reset_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::syn();
                 packet.set_connection_id(12_345);
@@ -1834,11 +1838,7 @@ mod tests {
             #[test]
             fn when_packet_is_reset_nothing_is_sent_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::reset();
                 packet.set_connection_id(12_345);
@@ -1858,12 +1858,9 @@ mod tests {
             fn it_attempts_to_send_all_queued_reset_packets() {
                 let mut evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
+                let inner = make_socket_inner(&evloop);
 
                 let task = future::lazy(|| {
-                    let (_listener_registration, listener_set_readiness) = Registration::new2();
-                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
-
                     let (packets_rx, remote_peer_addr) = wait_for_packets(&handle);
 
                     let mut packet = Packet::reset();
@@ -1898,11 +1895,7 @@ mod tests {
             #[test]
             fn when_listener_is_closed_it_schedules_reset_packet_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
                 unwrap!(inner.write()).listener_open = false;
 
                 let mut packet = Packet::syn();
@@ -1919,20 +1912,14 @@ mod tests {
             }
         }
 
-        fn make_socket_inner(evloop: &Core) -> Inner {
-            let handle = evloop.handle();
-            let (_listener_registration, listener_set_readiness) = Registration::new2();
-            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-            Inner::new(&handle, socket, listener_set_readiness)
-        }
-
         mod shutdown_write {
             use super::*;
 
             #[test]
             fn it_changes_connection_state_to_fin_sent() {
                 let evloop = unwrap!(Core::new());
-                let mut inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner(&evloop);
+                let mut inner = unwrap!(inner.write());
 
                 let key = Key {
                     receive_id: 12_345,
