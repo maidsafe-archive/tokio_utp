@@ -1605,7 +1605,7 @@ impl Connection {
             if self.is_writable() {
                 ready.insert(Ready::writable());
             }
-        } else if self.state.is_closed() {
+        } else if self.state.is_closed() && self.is_readable() {
             ready = Ready::readable();
         }
 
@@ -1616,6 +1616,7 @@ impl Connection {
 
     // =========
 
+    // Wonder why `read_open` has to be `False` for connection to be readable?
     fn is_readable(&self) -> bool {
         !self.read_open || self.in_queue.is_readable()
     }
@@ -1961,6 +1962,50 @@ mod tests {
                 let reset_info = unwrap!(conn.tick(&mut shared));
 
                 assert_eq!(reset_info, Some((12_346, addr!("1.2.3.4:5000"))));
+            }
+        }
+
+        mod update_readiness {
+            use super::*;
+
+            mod when_connection_is_closed {
+                use super::*;
+
+                #[test]
+                fn it_sets_readable_flag_when_connection_is_readable() {
+                    let key = Key {
+                        receive_id: 12_345,
+                        addr: addr!("1.2.3.4:5000"),
+                    };
+                    let (_registration, set_readiness) = Registration::new2();
+                    let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                    conn.read_open = false;
+                    conn.state = State::FinSent;
+                    assert!(conn.is_readable()); // ensure connection is readable
+
+                    unwrap!(conn.update_readiness());
+
+                    let ready = conn.set_readiness.readiness();
+                    assert!(ready.is_readable());
+                }
+
+                #[test]
+                fn it_doesnt_sets_readable_flag_if_connection_is_not_readable() {
+                    let key = Key {
+                        receive_id: 12_345,
+                        addr: addr!("1.2.3.4:5000"),
+                    };
+                    let (_registration, set_readiness) = Registration::new2();
+                    let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                    conn.read_open = true;
+                    conn.state = State::FinSent;
+                    assert!(!conn.is_readable()); // ensure connection is not readable
+
+                    unwrap!(conn.update_readiness());
+
+                    let ready = conn.set_readiness.readiness();
+                    assert!(!ready.is_readable());
+                }
             }
         }
     }
