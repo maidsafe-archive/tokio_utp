@@ -91,6 +91,8 @@ impl InQueue {
         }
     }
 
+    /// Returns true, if packet was successfully pushed to the queue, false otherwise.
+    /// Packets might not be accepted, if pending packets queue has reached the limit, etc.
     pub fn push(&mut self, packet: Packet) -> bool {
         trace!(
             "InQueue::push; packet={:?}; ack_nr={:?}",
