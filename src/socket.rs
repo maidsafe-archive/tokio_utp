@@ -1464,7 +1464,8 @@ impl Connection {
                     let max_sample = cmp::max(prev_average_delay, self.average_delay);
 
                     if min_sample > 0 {
-                        self.average_delay_base += min_sample as u32;
+                        self.average_delay_base =
+                            self.average_delay_base.wrapping_add(min_sample as u32);
                         self.average_delay -= min_sample;
                         prev_average_delay -= min_sample;
                     } else if max_sample < 0 {
