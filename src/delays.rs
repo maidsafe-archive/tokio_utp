@@ -23,6 +23,7 @@ impl Delays {
         Delays::default()
     }
 
+    /// Returns the minimum delay.
     pub fn get(&self) -> Option<u32> {
         self.last_step?;
         self.curr_delays.iter().min().cloned()

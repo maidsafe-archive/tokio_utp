@@ -25,6 +25,7 @@ const NANOS_PER_MICRO: u32 = 1_000;
 pub fn as_wrapping_micros(duration: Duration) -> u32 {
     // Wrapping is OK
     let mut ret = duration.as_secs().wrapping_mul(u64::from(MICROS_PER_SEC)) as u32;
+    // TODO(povilas): what if this addition overflows? V
     ret += duration.subsec_nanos() / NANOS_PER_MICRO;
     ret
 }
@@ -81,5 +82,32 @@ mod test {
     #[cfg(test)]
     pub fn reset_rand() {
         THREAD_RNG.with(|t| *t.borrow_mut() = XorShiftRng::new_unseeded());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod as_wrapping_micros {
+        use super::*;
+
+        #[test]
+        fn it_returns_given_duration_in_microseconds() {
+            let duration = Duration::new(2, 5000);
+
+            let micros = as_wrapping_micros(duration);
+
+            assert_eq!(micros, 2_000_005);
+        }
+
+        #[test]
+        fn when_microseconds_overflows_it_returns_wrapped_value() {
+            let elapsed = Duration::new(4295, 0);
+
+            let micros = as_wrapping_micros(elapsed);
+
+            assert_eq!(micros, 32_704);
+        }
     }
 }

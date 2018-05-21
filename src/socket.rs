@@ -670,10 +670,7 @@ impl Evented for UtpStream {
 impl Inner {
     fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
         Inner {
-            shared: Shared {
-                socket: socket,
-                ready: Ready::empty(),
-            },
+            shared: Shared::new(socket),
             remote: handle.remote().clone(),
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
@@ -804,6 +801,7 @@ impl Inner {
         conn.write_open = false;
         if !conn.state.is_closed() {
             conn.out_queue.push(Packet::fin());
+            conn.state = State::FinSent;
             conn.flush(&mut self.shared)?;
         }
         Ok(())
@@ -885,13 +883,20 @@ impl Inner {
         }
     }
 
-    // Note, it looks hairy to me that inner instance has to be passed to the method of Inner.
-    // I just copied this pattern fromm `Inner::refresh()`. But probably this should be reworked,
-    // if possible.
-    fn tick(&mut self, inner: &InnerCell) -> io::Result<()> {
+    fn tick(&mut self) -> io::Result<()> {
         trace!("Socket::tick");
+        let mut reset_packets = Vec::new();
+
         for &idx in self.connection_lookup.values() {
-            self.connections[idx].tick(&mut self.shared, inner)?;
+            if let Some((conn_id, peer_addr)) = self.connections[idx].tick(&mut self.shared)? {
+                // partial borrowing is currently not possible in Rust so we can't call
+                // self.schedule_reset() in here, hence collect packets :/
+                reset_packets.push((conn_id, peer_addr));
+            }
+        }
+
+        for (conn_id, peer_addr) in reset_packets {
+            self.schedule_reset(conn_id, peer_addr);
         }
 
         Ok(())
@@ -1136,6 +1141,13 @@ impl Inner {
 }
 
 impl Shared {
+    fn new(socket: UdpSocket) -> Self {
+        Self {
+            socket,
+            ready: Ready::empty(),
+        }
+    }
+
     fn update_ready(&mut self, ready: Ready) {
         self.ready |= ready;
     }
@@ -1376,17 +1388,16 @@ impl Connection {
         Ok(true)
     }
 
-    fn tick(&mut self, shared: &mut Shared, inner: &InnerCell) -> io::Result<()> {
+    fn tick(&mut self, shared: &mut Shared) -> io::Result<Option<(u16, SocketAddr)>> {
         if self.state == State::Reset {
-            return Ok(());
+            return Ok(None);
         }
 
         let now = Instant::now();
         if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
-            unwrap!(inner.write()).schedule_reset(self.out_queue.connection_id(), self.key.addr);
             self.state = State::Reset;
             self.update_readiness()?;
-            return Ok(());
+            return Ok(Some((self.out_queue.connection_id(), self.key.addr)));
         }
 
         if let Some(deadline) = self.deadline {
@@ -1400,7 +1411,7 @@ impl Connection {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn update_delays(&mut self, now: Instant, packet: &Packet) {
@@ -1450,6 +1461,7 @@ impl Connection {
                 self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
                 self.current_delay_samples += 1;
 
+                // recalculate delays every 5 seconds or so
                 if now > self.average_sample_time {
                     let mut prev_average_delay = self.average_delay;
                     self.average_delay =
@@ -1463,14 +1475,14 @@ impl Connection {
                     let max_sample = cmp::max(prev_average_delay, self.average_delay);
 
                     if min_sample > 0 {
-                        self.average_delay_base += min_sample as u32;
+                        self.average_delay_base =
+                            self.average_delay_base.wrapping_add(min_sample as u32);
                         self.average_delay -= min_sample;
                         prev_average_delay -= min_sample;
                     } else if max_sample < 0 {
                         let adjust = -max_sample;
-
                         self.average_delay_base =
-                            self.average_delay_base.saturating_sub(adjust as u32);
+                            self.average_delay_base.wrapping_sub(adjust as u32);
                         self.average_delay += adjust;
                         prev_average_delay += adjust;
                     }
@@ -1593,7 +1605,7 @@ impl Connection {
             if self.is_writable() {
                 ready.insert(Ready::writable());
             }
-        } else if self.state.is_closed() {
+        } else if self.state.is_closed() && self.is_readable() {
             ready = Ready::readable();
         }
 
@@ -1604,6 +1616,7 @@ impl Connection {
 
     // =========
 
+    // Wonder why `read_open` has to be `False` for connection to be readable?
     fn is_readable(&self) -> bool {
         !self.read_open || self.in_queue.is_readable()
     }
@@ -1683,7 +1696,7 @@ impl Future for SocketRefresher {
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
         while let Async::Ready(()) = self.timeout.poll()? {
-            unwrap!(self.inner.write()).tick(&self.inner)?;
+            unwrap!(self.inner.write()).tick()?;
             self.next_tick += Duration::from_millis(500);
             self.timeout.reset(self.next_tick);
         }
@@ -1763,12 +1776,12 @@ impl AsyncWrite for UtpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_core::reactor::Core;
 
     mod inner {
         use super::*;
         use futures::future::{self, Loop};
         use futures::sync::mpsc;
-        use tokio_core::reactor::Core;
 
         /// Creates new UDP socket and waits for incoming uTP packets.
         /// Returns future that yields received packet and listener address.
@@ -1794,17 +1807,21 @@ mod tests {
             (packets_rx, listener_addr)
         }
 
+        /// Reduce some boilerplate
+        fn make_socket_inner(evloop: &Core) -> InnerCell {
+            let handle = evloop.handle();
+            let (_listener_registration, listener_set_readiness) = Registration::new2();
+            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+            Inner::new_shared(&handle, socket, listener_set_readiness)
+        }
+
         mod process_unknown {
             use super::*;
 
             #[test]
             fn when_packet_is_syn_it_schedules_reset_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::syn();
                 packet.set_connection_id(12_345);
@@ -1822,11 +1839,7 @@ mod tests {
             #[test]
             fn when_packet_is_reset_nothing_is_sent_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::reset();
                 packet.set_connection_id(12_345);
@@ -1846,12 +1859,9 @@ mod tests {
             fn it_attempts_to_send_all_queued_reset_packets() {
                 let mut evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
+                let inner = make_socket_inner(&evloop);
 
                 let task = future::lazy(|| {
-                    let (_listener_registration, listener_set_readiness) = Registration::new2();
-                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
-
                     let (packets_rx, remote_peer_addr) = wait_for_packets(&handle);
 
                     let mut packet = Packet::reset();
@@ -1886,11 +1896,7 @@ mod tests {
             #[test]
             fn when_listener_is_closed_it_schedules_reset_packet_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
                 unwrap!(inner.write()).listener_open = false;
 
                 let mut packet = Packet::syn();
@@ -1904,6 +1910,102 @@ mod tests {
                 assert_eq!(packet.connection_id(), 12_345);
                 assert_eq!(packet.ty(), packet::Type::Reset);
                 assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
+            }
+        }
+
+        mod shutdown_write {
+            use super::*;
+
+            #[test]
+            fn it_changes_connection_state_to_fin_sent() {
+                let evloop = unwrap!(Core::new());
+                let inner = make_socket_inner(&evloop);
+                let mut inner = unwrap!(inner.write());
+
+                let key = Key {
+                    receive_id: 12_345,
+                    addr: addr!("1.2.3.4:5000"),
+                };
+                let (_registration, set_readiness) = Registration::new2();
+                let conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                let conn_token = inner.connections.insert(conn);
+
+                unwrap!(inner.shutdown_write(conn_token));
+
+                let conn = &inner.connections[conn_token];
+                assert_eq!(conn.state, State::FinSent);
+            }
+        }
+    }
+
+    mod connection {
+        use super::*;
+
+        mod tick {
+            use super::*;
+
+            #[test]
+            fn when_no_data_is_received_within_timeout_it_schedules_reset() {
+                let evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+                let key = Key {
+                    receive_id: 12_345,
+                    addr: addr!("1.2.3.4:5000"),
+                };
+                let (_registration, set_readiness) = Registration::new2();
+                let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                // make connection timeout
+                conn.disconnect_timeout_secs = 0;
+                let sock = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let mut shared = Shared::new(sock);
+
+                let reset_info = unwrap!(conn.tick(&mut shared));
+
+                assert_eq!(reset_info, Some((12_346, addr!("1.2.3.4:5000"))));
+            }
+        }
+
+        mod update_readiness {
+            use super::*;
+
+            mod when_connection_is_closed {
+                use super::*;
+
+                #[test]
+                fn it_sets_readable_flag_when_connection_is_readable() {
+                    let key = Key {
+                        receive_id: 12_345,
+                        addr: addr!("1.2.3.4:5000"),
+                    };
+                    let (_registration, set_readiness) = Registration::new2();
+                    let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                    conn.read_open = false;
+                    conn.state = State::FinSent;
+                    assert!(conn.is_readable()); // ensure connection is readable
+
+                    unwrap!(conn.update_readiness());
+
+                    let ready = conn.set_readiness.readiness();
+                    assert!(ready.is_readable());
+                }
+
+                #[test]
+                fn it_doesnt_sets_readable_flag_if_connection_is_not_readable() {
+                    let key = Key {
+                        receive_id: 12_345,
+                        addr: addr!("1.2.3.4:5000"),
+                    };
+                    let (_registration, set_readiness) = Registration::new2();
+                    let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                    conn.read_open = true;
+                    conn.state = State::FinSent;
+                    assert!(!conn.is_readable()); // ensure connection is not readable
+
+                    unwrap!(conn.update_readiness());
+
+                    let ready = conn.set_readiness.readiness();
+                    assert!(!ready.is_readable());
+                }
             }
         }
     }
