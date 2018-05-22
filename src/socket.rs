@@ -1507,25 +1507,18 @@ impl Connection {
             }
 
             if actual_delay != u32::MAX && acked_bytes >= 1 {
-                self.apply_congestion_control(acked_bytes, actual_delay, min_rtt, now);
+                trace!(
+                    "applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
+                    acked_bytes,
+                    actual_delay,
+                    min_rtt
+                );
+                self.apply_congestion_control(acked_bytes, min_rtt, now);
             }
         }
     }
 
-    fn apply_congestion_control(
-        &mut self,
-        bytes_acked: usize,
-        actual_delay: u32,
-        min_rtt: u32,
-        now: Instant,
-    ) {
-        trace!(
-            "applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
-            bytes_acked,
-            actual_delay,
-            min_rtt
-        );
-
+    fn apply_congestion_control(&mut self, bytes_acked: usize, min_rtt: u32, now: Instant) {
         let target = TARGET_DELAY;
 
         let mut our_delay = cmp::min(self.our_delays.get().unwrap(), min_rtt);
