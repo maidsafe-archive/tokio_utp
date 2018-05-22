@@ -1460,6 +1460,7 @@ impl Connection {
                 self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
                 self.current_delay_samples += 1;
 
+                // recalculate delays every 5 seconds or so
                 if now > self.average_sample_time {
                     let mut prev_average_delay = self.average_delay;
                     self.average_delay =
