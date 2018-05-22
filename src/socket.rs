@@ -1241,8 +1241,6 @@ impl Connection {
 
     /// Process an inbound packet for the connection
     fn process(&mut self, packet: Packet, shared: &mut Shared) -> io::Result<bool> {
-        let now = Instant::now();
-
         if self.state == State::Reset {
             return Ok(self.is_finalized());
         }
@@ -1258,6 +1256,7 @@ impl Connection {
 
         // TODO: Invalid packets should be discarded here.
 
+        let now = Instant::now();
         self.update_delays(now, &packet);
 
         if packet.ty() == packet::Type::State {
