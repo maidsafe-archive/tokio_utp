@@ -670,10 +670,7 @@ impl Evented for UtpStream {
 impl Inner {
     fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
         Inner {
-            shared: Shared {
-                socket: socket,
-                ready: Ready::empty(),
-            },
+            shared: Shared::new(socket),
             remote: handle.remote().clone(),
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
@@ -885,13 +882,20 @@ impl Inner {
         }
     }
 
-    // Note, it looks hairy to me that inner instance has to be passed to the method of Inner.
-    // I just copied this pattern fromm `Inner::refresh()`. But probably this should be reworked,
-    // if possible.
-    fn tick(&mut self, inner: &InnerCell) -> io::Result<()> {
+    fn tick(&mut self) -> io::Result<()> {
         trace!("Socket::tick");
+        let mut reset_packets = Vec::new();
+
         for &idx in self.connection_lookup.values() {
-            self.connections[idx].tick(&mut self.shared, inner)?;
+            if let Some((conn_id, peer_addr)) = self.connections[idx].tick(&mut self.shared)? {
+                // partial borrowing is currently not possible in Rust so we can't call
+                // self.schedule_reset() in here, hence collect packets :/
+                reset_packets.push((conn_id, peer_addr));
+            }
+        }
+
+        for (conn_id, peer_addr) in reset_packets {
+            self.schedule_reset(conn_id, peer_addr);
         }
 
         Ok(())
@@ -1136,6 +1140,13 @@ impl Inner {
 }
 
 impl Shared {
+    fn new(socket: UdpSocket) -> Self {
+        Self {
+            socket,
+            ready: Ready::empty(),
+        }
+    }
+
     fn update_ready(&mut self, ready: Ready) {
         self.ready |= ready;
     }
@@ -1376,17 +1387,16 @@ impl Connection {
         Ok(true)
     }
 
-    fn tick(&mut self, shared: &mut Shared, inner: &InnerCell) -> io::Result<()> {
+    fn tick(&mut self, shared: &mut Shared) -> io::Result<Option<(u16, SocketAddr)>> {
         if self.state == State::Reset {
-            return Ok(());
+            return Ok(None);
         }
 
         let now = Instant::now();
         if now > self.last_recv_time + Duration::new(u64::from(self.disconnect_timeout_secs), 0) {
-            unwrap!(inner.write()).schedule_reset(self.out_queue.connection_id(), self.key.addr);
             self.state = State::Reset;
             self.update_readiness()?;
-            return Ok(());
+            return Ok(Some((self.out_queue.connection_id(), self.key.addr)));
         }
 
         if let Some(deadline) = self.deadline {
@@ -1400,7 +1410,7 @@ impl Connection {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn update_delays(&mut self, now: Instant, packet: &Packet) {
@@ -1683,7 +1693,7 @@ impl Future for SocketRefresher {
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
         while let Async::Ready(()) = self.timeout.poll()? {
-            unwrap!(self.inner.write()).tick(&self.inner)?;
+            unwrap!(self.inner.write()).tick()?;
             self.next_tick += Duration::from_millis(500);
             self.timeout.reset(self.next_tick);
         }
@@ -1763,12 +1773,12 @@ impl AsyncWrite for UtpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_core::reactor::Core;
 
     mod inner {
         use super::*;
         use futures::future::{self, Loop};
         use futures::sync::mpsc;
-        use tokio_core::reactor::Core;
 
         /// Creates new UDP socket and waits for incoming uTP packets.
         /// Returns future that yields received packet and listener address.
@@ -1904,6 +1914,34 @@ mod tests {
                 assert_eq!(packet.connection_id(), 12_345);
                 assert_eq!(packet.ty(), packet::Type::Reset);
                 assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
+            }
+        }
+    }
+
+    mod connection {
+        use super::*;
+
+        mod tick {
+            use super::*;
+
+            #[test]
+            fn when_no_data_is_received_within_timeout_it_schedules_reset() {
+                let evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+                let key = Key {
+                    receive_id: 12_345,
+                    addr: addr!("1.2.3.4:5000"),
+                };
+                let (_registration, set_readiness) = Registration::new2();
+                let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
+                // make connection timeout
+                conn.disconnect_timeout_secs = 0;
+                let sock = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let mut shared = Shared::new(sock);
+
+                let reset_info = unwrap!(conn.tick(&mut shared));
+
+                assert_eq!(reset_info, Some((12_346, addr!("1.2.3.4:5000"))));
             }
         }
     }
