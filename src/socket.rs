@@ -1526,13 +1526,13 @@ impl Connection {
         let max_sample = cmp::max(prev_average_delay, self.average_delay);
 
         if min_sample > 0 {
-            self.average_delay_base += min_sample as u32;
+            self.average_delay_base = self.average_delay_base.wrapping_add(min_sample as u32);
             self.average_delay -= min_sample;
             prev_average_delay -= min_sample;
         } else if max_sample < 0 {
             let adjust = -max_sample;
 
-            self.average_delay_base = self.average_delay_base.saturating_sub(adjust as u32);
+            self.average_delay_base = self.average_delay_base.wrapping_sub(adjust as u32);
             self.average_delay += adjust;
             prev_average_delay += adjust;
         }
@@ -2048,6 +2048,17 @@ mod tests {
                 }
 
                 #[test]
+                fn it_adds_smaller_average_delay_to_avg_delay_base_and_wraps_when_overflow() {
+                    let mut conn = test_connection();
+                    conn.average_delay = 4000;
+                    conn.average_delay_base = -1000i32 as u32;
+
+                    let _ = conn.adjust_average_delay(2000);
+
+                    assert_eq!(conn.average_delay_base, 1000);
+                }
+
+                #[test]
                 fn it_subtracts_smaller_average_delay_from_avg_delay() {
                     let mut conn = test_connection();
                     conn.average_delay = 4000;
@@ -2080,6 +2091,17 @@ mod tests {
                     let _ = conn.adjust_average_delay(-2000);
 
                     assert_eq!(conn.average_delay_base, 3000);
+                }
+
+                #[test]
+                fn it_subtracts_bigger_avg_delay_from_avg_delay_base_and_wraps_when_underflow() {
+                    let mut conn = test_connection();
+                    conn.average_delay = -4000;
+                    conn.average_delay_base = 1000;
+
+                    let _ = conn.adjust_average_delay(-2000);
+
+                    assert_eq!(conn.average_delay_base, -1000i32 as u32);
                 }
 
                 #[test]
