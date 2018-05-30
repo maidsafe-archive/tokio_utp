@@ -172,9 +172,12 @@ struct Connection {
     their_delays: Delays,
 
     last_maxed_out_window: Instant,
+    // This is actually average of delay differences. It's used to recalculate `clock_drift`.
+    // It's an average deviation from `average_delay_base`.
     average_delay: i32,
     current_delay_sum: i64,
     current_delay_samples: i64,
+    // This is a reference value from which delay difference is measured.
     average_delay_base: u32,
     average_sample_time: Instant,
     clock_drift: i32,
@@ -1241,8 +1244,6 @@ impl Connection {
 
     /// Process an inbound packet for the connection
     fn process(&mut self, packet: Packet, shared: &mut Shared) -> io::Result<bool> {
-        let now = Instant::now();
-
         if self.state == State::Reset {
             return Ok(self.is_finalized());
         }
@@ -1258,6 +1259,7 @@ impl Connection {
 
         // TODO: Invalid packets should be discarded here.
 
+        let now = Instant::now();
         self.update_delays(now, &packet);
 
         if packet.ty() == packet::Type::State {
@@ -1413,78 +1415,28 @@ impl Connection {
         Ok(None)
     }
 
+    // TODO(povilas): extract to congestion control structure
     fn update_delays(&mut self, now: Instant, packet: &Packet) {
         let mut actual_delay = u32::MAX;
 
         if packet.timestamp() > 0 {
-            // Use the packet to update the delay value
-            let their_delay = self.out_queue.update_their_delay(packet.timestamp());
-            let prev_base_delay = self.their_delays.base_delay();
-
-            // Track the delay
-            self.their_delays.add_sample(their_delay, now);
-
-            if let Some(prev) = prev_base_delay {
-                let new = self.their_delays.base_delay().unwrap();
-
-                // If their new base delay is less than their previous one, we
-                // should shift our delay base in the other direction in order
-                // to take the clock skew into account.
-                let lt = util::wrapping_lt(new, prev, TIMESTAMP_MASK);
-                let diff = prev.wrapping_sub(new);
-
-                if lt && diff <= 10_000 {
-                    self.our_delays.shift(diff);
-                }
-            }
+            self.fix_clock_skew(packet, now);
 
             actual_delay = packet.timestamp_diff();
-
             if actual_delay != u32::MAX {
                 self.our_delays.add_sample(actual_delay, now);
 
                 if self.average_delay_base == 0 {
                     self.average_delay_base = actual_delay;
                 }
-
-                let average_delay_sample;
-                let dist_down = self.average_delay_base.wrapping_sub(actual_delay);
-                let dist_up = actual_delay.wrapping_sub(self.average_delay_base);
-
-                if dist_down > dist_up {
-                    average_delay_sample = i64::from(dist_up);
-                } else {
-                    average_delay_sample = -i64::from(dist_down);
-                }
-
-                self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
-                self.current_delay_samples += 1;
+                self.sum_delay_diffs(actual_delay);
 
                 // recalculate delays every 5 seconds or so
                 if now > self.average_sample_time {
-                    let mut prev_average_delay = self.average_delay;
-                    self.average_delay =
-                        (self.current_delay_sum / self.current_delay_samples) as i32;
+                    let prev_average_delay = self.average_delay;
+                    self.recalculate_avg_delay();
                     self.average_sample_time = now + Duration::from_secs(5);
-
-                    self.current_delay_sum = 0;
-                    self.current_delay_samples = 0;
-
-                    let min_sample = cmp::min(prev_average_delay, self.average_delay);
-                    let max_sample = cmp::max(prev_average_delay, self.average_delay);
-
-                    if min_sample > 0 {
-                        self.average_delay_base += min_sample as u32;
-                        self.average_delay -= min_sample;
-                        prev_average_delay -= min_sample;
-                    } else if max_sample < 0 {
-                        let adjust = -max_sample;
-
-                        self.average_delay_base =
-                            self.average_delay_base.saturating_sub(adjust as u32);
-                        self.average_delay += adjust;
-                        prev_average_delay += adjust;
-                    }
+                    let prev_average_delay = self.adjust_average_delay(prev_average_delay);
 
                     // Update the clock drive estimate
                     let drift = i64::from(self.average_delay) - i64::from(prev_average_delay);
@@ -1508,25 +1460,88 @@ impl Connection {
             }
 
             if actual_delay != u32::MAX && acked_bytes >= 1 {
-                self.apply_congestion_control(acked_bytes, actual_delay, min_rtt, now);
+                trace!(
+                    "applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
+                    acked_bytes,
+                    actual_delay,
+                    min_rtt
+                );
+                self.apply_congestion_control(acked_bytes, min_rtt, now);
             }
         }
     }
 
-    fn apply_congestion_control(
-        &mut self,
-        bytes_acked: usize,
-        actual_delay: u32,
-        min_rtt: u32,
-        now: Instant,
-    ) {
-        trace!(
-            "applying congenstion control; bytes_acked={}; actual_delay={}; min_rtt={}",
-            bytes_acked,
-            actual_delay,
-            min_rtt
-        );
+    fn fix_clock_skew(&mut self, packet: &Packet, now: Instant) {
+        // Use the packet to update the delay value
+        let their_delay = self.out_queue.update_their_delay(packet.timestamp());
+        let prev_base_delay = self.their_delays.base_delay();
 
+        // Track the delay
+        self.their_delays.add_sample(their_delay, now);
+
+        if let Some(prev) = prev_base_delay {
+            let new = self.their_delays.base_delay().unwrap();
+
+            // If their new base delay is less than their previous one, we
+            // should shift our delay base in the other direction in order
+            // to take the clock skew into account.
+            let lt = util::wrapping_lt(new, prev, TIMESTAMP_MASK);
+            let diff = prev.wrapping_sub(new);
+
+            if lt && diff <= 10_000 {
+                self.our_delays.shift(diff);
+            }
+        }
+    }
+
+    /// Sums the difference between given delay and current average base delay.
+    /// If current delay is bigger, the difference is added. If it's smaller, the diff is
+    /// subtracted. So `self.current_delay_sum` is tracking how delays are increasing.
+    // TODO(povilas): extract to congestion control structure
+    fn sum_delay_diffs(&mut self, actual_delay: u32) {
+        let average_delay_sample;
+        let dist_down = self.average_delay_base.wrapping_sub(actual_delay);
+        let dist_up = actual_delay.wrapping_sub(self.average_delay_base);
+
+        // the logic behind this is:
+        //   if wrapping_lt(self.average_delay_base, actual_delay)
+        if dist_down > dist_up {
+            average_delay_sample = i64::from(dist_up);
+        } else {
+            average_delay_sample = -i64::from(dist_down);
+        }
+
+        self.current_delay_sum = self.current_delay_sum.wrapping_add(average_delay_sample);
+        self.current_delay_samples += 1;
+    }
+
+    fn recalculate_avg_delay(&mut self) {
+        self.average_delay = (self.current_delay_sum / self.current_delay_samples) as i32;
+        self.current_delay_sum = 0;
+        self.current_delay_samples = 0;
+    }
+
+    fn adjust_average_delay(&mut self, mut prev_average_delay: i32) -> i32 {
+        let min_sample = cmp::min(prev_average_delay, self.average_delay);
+        let max_sample = cmp::max(prev_average_delay, self.average_delay);
+
+        if min_sample > 0 {
+            self.average_delay_base += min_sample as u32;
+            self.average_delay -= min_sample;
+            prev_average_delay -= min_sample;
+        } else if max_sample < 0 {
+            let adjust = -max_sample;
+
+            self.average_delay_base = self.average_delay_base.saturating_sub(adjust as u32);
+            self.average_delay += adjust;
+            prev_average_delay += adjust;
+        }
+
+        prev_average_delay
+    }
+
+    // TODO(povilas): extract to congestion control structure
+    fn apply_congestion_control(&mut self, bytes_acked: usize, min_rtt: u32, now: Instant) {
         let target = TARGET_DELAY;
 
         let mut our_delay = cmp::min(self.our_delays.get().unwrap(), min_rtt);
@@ -1543,10 +1558,10 @@ impl Connection {
         }
 
         let off_target = (i64::from(target) - i64::from(our_delay)) as f64;
+        let delay_factor = off_target / f64::from(target);
+
         let window_factor =
             cmp::min(bytes_acked, max_window) as f64 / cmp::max(max_window, bytes_acked) as f64;
-
-        let delay_factor = off_target / f64::from(target);
         let mut scaled_gain = MAX_CWND_INCREASE_BYTES_PER_RTT as f64 * window_factor * delay_factor;
 
         if scaled_gain > 0.0 && now - self.last_maxed_out_window > Duration::from_secs(1) {
@@ -1922,6 +1937,16 @@ mod tests {
     mod connection {
         use super::*;
 
+        /// Reduces boilerplate and creates connection with some specific parameters.
+        fn test_connection() -> Connection {
+            let key = Key {
+                receive_id: 12_345,
+                addr: addr!("1.2.3.4:5000"),
+            };
+            let (_registration, set_readiness) = Registration::new2();
+            Connection::new_outgoing(key, set_readiness, 12_346)
+        }
+
         mod tick {
             use super::*;
 
@@ -1943,6 +1968,139 @@ mod tests {
                 let reset_info = unwrap!(conn.tick(&mut shared));
 
                 assert_eq!(reset_info, Some((12_346, addr!("1.2.3.4:5000"))));
+            }
+        }
+
+        mod sum_delay_diffs {
+            use super::*;
+
+            mod when_avg_delay_base_is_bigger_than_actual_delay {
+                use super::*;
+
+                #[test]
+                fn it_adds_their_negative_difference() {
+                    let mut conn = test_connection();
+                    conn.average_delay_base = 500;
+
+                    conn.sum_delay_diffs(200);
+
+                    assert_eq!(conn.current_delay_sum, -300);
+                }
+            }
+
+            mod when_actual_delay_is_bigger_than_avg_base_delay {
+                use super::*;
+
+                #[test]
+                fn it_adds_their_difference() {
+                    let mut conn = test_connection();
+                    conn.average_delay_base = 200;
+
+                    conn.sum_delay_diffs(500);
+
+                    assert_eq!(conn.current_delay_sum, 300);
+                }
+            }
+        }
+
+        mod recalculate_avg_delay {
+            use super::*;
+
+            #[test]
+            fn it_sets_average_delay_from_current_delay_sum() {
+                let mut conn = test_connection();
+                conn.current_delay_sum = 2500;
+                conn.current_delay_samples = 5;
+
+                conn.recalculate_avg_delay();
+
+                assert_eq!(conn.average_delay, 500);
+            }
+
+            #[test]
+            fn it_clears_current_delay_sum() {
+                let mut conn = test_connection();
+                conn.current_delay_sum = 2500;
+                conn.current_delay_samples = 5;
+
+                conn.recalculate_avg_delay();
+
+                assert_eq!(conn.current_delay_sum, 0);
+                assert_eq!(conn.current_delay_samples, 0);
+            }
+        }
+
+        mod adjust_average_delay {
+            use super::*;
+
+            mod when_prev_and_current_avg_delays_are_positive {
+                use super::*;
+
+                #[test]
+                fn it_adds_smaller_average_delay_to_avg_delay_base() {
+                    let mut conn = test_connection();
+                    conn.average_delay = 4000;
+                    conn.average_delay_base = 1000;
+
+                    let _ = conn.adjust_average_delay(2000);
+
+                    assert_eq!(conn.average_delay_base, 3000);
+                }
+
+                #[test]
+                fn it_subtracts_smaller_average_delay_from_avg_delay() {
+                    let mut conn = test_connection();
+                    conn.average_delay = 4000;
+
+                    let _ = conn.adjust_average_delay(1000);
+
+                    assert_eq!(conn.average_delay, 3000);
+                }
+
+                #[test]
+                fn it_subtracts_smaller_average_delay_from_prev_avg_delay() {
+                    let mut conn = test_connection();
+                    conn.average_delay = 1000;
+
+                    let prev_average_delay = conn.adjust_average_delay(4000);
+
+                    assert_eq!(prev_average_delay, 3000);
+                }
+            }
+
+            mod when_prev_and_current_avg_delays_are_negative {
+                use super::*;
+
+                #[test]
+                fn it_subtracts_bigger_average_delay_from_avg_delay_base() {
+                    let mut conn = test_connection();
+                    conn.average_delay = -4000;
+                    conn.average_delay_base = 5000;
+
+                    let _ = conn.adjust_average_delay(-2000);
+
+                    assert_eq!(conn.average_delay_base, 3000);
+                }
+
+                #[test]
+                fn it_adds_bigger_average_delay_to_avg_delay() {
+                    let mut conn = test_connection();
+                    conn.average_delay = -4000;
+
+                    let _ = conn.adjust_average_delay(-1000);
+
+                    assert_eq!(conn.average_delay, -3000);
+                }
+
+                #[test]
+                fn it_adds_bigger_average_delay_to_prev_avg_delay() {
+                    let mut conn = test_connection();
+                    conn.average_delay = -1000;
+
+                    let prev_average_delay = conn.adjust_average_delay(-4000);
+
+                    assert_eq!(prev_average_delay, -3000);
+                }
             }
         }
     }

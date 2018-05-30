@@ -10,11 +10,11 @@ pub fn as_ms(duration: Duration) -> u64 {
     }
 }
 
-/// Wrapping less than comparison
+/// Wrapping less than comparison.
+/// E.g. `-10 as u32 < 10`, where `-10 as u32` actually is `4294967276`.
 pub fn wrapping_lt(lhs: u32, rhs: u32, mask: u32) -> bool {
     let dist_dn = lhs.wrapping_sub(rhs) & mask;
     let dist_up = rhs.wrapping_sub(lhs) & mask;
-
     dist_up < dist_dn
 }
 
@@ -108,6 +108,19 @@ mod tests {
             let micros = as_wrapping_micros(elapsed);
 
             assert_eq!(micros, 32_704);
+        }
+    }
+
+    mod wrapping_lt {
+        use super::*;
+
+        #[test]
+        fn it_compares_two_numbers_as_if_they_were_signed() {
+            let a: u32 = -10i32 as u32;
+            let b: u32 = 10;
+            let less = wrapping_lt(a, b, 0xFF_FF_FF_FF);
+
+            assert!(less);
         }
     }
 }
