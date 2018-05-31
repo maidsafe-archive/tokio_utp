@@ -28,7 +28,7 @@ script:
     elif [ "${TRAVIS_OS_NAME}" = linux ]; then
       (
         set -x;
-        cargo fmt -- --write-mode=diff &&
+        cargo fmt -- --check &&
         cargo clippy && cargo clippy --profile=test
       );
     fi
