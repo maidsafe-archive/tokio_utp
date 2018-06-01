@@ -20,7 +20,7 @@ use std::fmt;
 /// | seq_nr                        | ack_nr                        |
 /// +---------------+---------------+---------------+---------------+
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Packet {
     padding: usize,
     data: BytesMut,

@@ -47,8 +47,7 @@ impl InQueue {
         (ack_nr, selective_acks)
     }
 
-    /// Poll the next CTL packet for processing. Data packets are queued for
-    /// read
+    /// Poll the next CTL packet for processing. Data packets are queued for read.
     pub fn poll(&mut self) -> Option<Packet> {
         trace!("poll; ack_nr={:?}", self.ack_nr);
 
@@ -133,7 +132,6 @@ impl InQueue {
             seq_nr,
             slot
         );
-
         self.packets[slot] = Some(packet);
         true
     }
@@ -159,6 +157,7 @@ impl InQueue {
         Ok(n)
     }
 
+    /// Returns true, if there's data buffered.
     pub fn is_readable(&self) -> bool {
         !self.data.is_empty()
     }
@@ -204,5 +203,107 @@ fn in_range(ack_nr: u16, seq_nr: u16) -> bool {
     } else {
         // Wrapping case
         seq_nr > ack_nr || seq_nr <= upper
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod in_queue {
+        use super::*;
+
+        mod push {
+            use super::*;
+
+            #[test]
+            fn it_store_given_packet_to_free_slot_indexed_by_packet_sequence_number() {
+                let mut in_queue = InQueue::new(None);
+                let mut packet = Packet::syn();
+                packet.set_seq_nr(1);
+
+                let stored = in_queue.push(packet.clone());
+
+                assert!(stored);
+                assert_eq!(in_queue.packets[1], Some(packet));
+            }
+
+            #[test]
+            fn when_packet_slot_is_taken_it_returns_false() {
+                let mut in_queue = InQueue::new(None);
+                let mut packet = Packet::syn();
+                packet.set_seq_nr(1);
+                let _ = in_queue.push(packet.clone());
+
+                let stored = in_queue.push(packet);
+
+                assert!(!stored);
+            }
+        }
+
+        mod poll {
+            use super::*;
+
+            #[test]
+            fn when_ack_number_is_none_it_returns_none() {
+                let mut in_queue = InQueue::new(None);
+
+                let packet = in_queue.poll();
+
+                assert!(packet.is_none());
+            }
+
+            #[test]
+            fn when_oldest_packet_is_data_it_is_put_to_data_buffer() {
+                let mut in_queue = InQueue::new(Some(0));
+                let mut packet = Packet::data(&[1, 2, 3, 4]);
+                packet.set_seq_nr(1);
+                let _ = in_queue.push(packet);
+
+                let _ = in_queue.poll();
+
+                let mut buffered_data = [0; 4];
+                let _ = unwrap!(in_queue.read(&mut buffered_data));
+
+                assert_eq!(buffered_data, [1, 2, 3, 4]);
+            }
+
+            #[test]
+            fn it_sets_last_ack_nr_to_last_processed_packet_sequence_number() {
+                let mut in_queue = InQueue::new(Some(0));
+                let mut packet = Packet::data(&[1, 2, 3, 4]);
+                packet.set_seq_nr(1);
+                let _ = in_queue.push(packet);
+                let mut packet = Packet::data(&[1, 2, 3, 5]);
+                packet.set_seq_nr(2);
+                let _ = in_queue.push(packet);
+
+                let _ = in_queue.poll();
+
+                assert_eq!(in_queue.ack_nr, Some(2));
+            }
+        }
+
+        mod is_readable {
+            use super::*;
+
+            #[test]
+            fn when_data_buffer_is_empty_it_returns_false() {
+                let in_queue = InQueue::new(None);
+
+                assert!(!in_queue.is_readable());
+            }
+
+            #[test]
+            fn when_queue_has_packets_buffered_it_returns_true() {
+                let mut in_queue = InQueue::new(Some(0));
+                let mut packet = Packet::data(&[1, 2, 3, 4]);
+                packet.set_seq_nr(1);
+                assert!(in_queue.push(packet));
+                let _ = in_queue.poll();
+
+                assert!(in_queue.is_readable());
+            }
+        }
     }
 }
