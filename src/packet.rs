@@ -74,7 +74,7 @@ impl Packet {
 
     pub fn new(padding: usize, packet: BytesMut) -> Packet {
         Packet {
-            padding: padding,
+            padding,
             data: packet,
         }
     }

@@ -30,7 +30,7 @@ impl InQueue {
         InQueue {
             packets: Default::default(),
             data: VecDeque::new(),
-            ack_nr: ack_nr,
+            ack_nr,
         }
     }
 

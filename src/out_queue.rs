@@ -90,9 +90,9 @@ impl OutQueue {
         OutQueue {
             packets: VecDeque::new(),
             state: State {
-                connection_id: connection_id,
-                seq_nr: seq_nr,
-                local_ack: local_ack,
+                connection_id,
+                seq_nr,
+                local_ack,
                 selective_acks: [0; 4],
                 last_ack: None,
                 local_window: MAX_WINDOW_SIZE as u32,
@@ -261,7 +261,7 @@ impl OutQueue {
         packet.set_seq_nr(self.state.seq_nr);
 
         self.packets.push_back(Entry {
-            packet: packet,
+            packet,
             num_sends: 0,
             last_sent_at: None,
             acked: false,

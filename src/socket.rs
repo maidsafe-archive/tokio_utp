@@ -254,9 +254,9 @@ impl UtpSocket {
         let next_tick = Instant::now() + Duration::from_millis(500);
         let timeout = Timeout::new_at(next_tick, handle)?;
         let refresher = SocketRefresher {
-            inner: inner,
-            next_tick: next_tick,
-            timeout: timeout,
+            inner,
+            next_tick,
+            timeout,
             req_finalize: finalize_rx,
         };
         handle.spawn(refresher);
@@ -794,8 +794,8 @@ impl Inner {
 
         Ok(UtpStream {
             inner: inner.clone(),
-            token: token,
-            registration: registration,
+            token,
+            registration,
         })
     }
 
@@ -993,8 +993,8 @@ impl Inner {
         // Store the connection in the accept buffer
         self.accept_buf.push_back(UtpStream {
             inner: inner.clone(),
-            token: token,
-            registration: registration,
+            token,
+            registration,
         });
 
         // Notify the listener
@@ -1047,7 +1047,7 @@ impl Inner {
             inner: inner.clone(),
             peer_addr: addr,
             bytes_rx: rx,
-            registration: registration,
+            registration,
         };
         // NOTE: See the comments in RawChannel::drop about removing this restriction
         assert!(
@@ -1651,8 +1651,8 @@ impl State {
 impl Key {
     fn new(receive_id: u16, addr: SocketAddr) -> Key {
         Key {
-            receive_id: receive_id,
-            addr: addr,
+            receive_id,
+            addr,
         }
     }
 }
