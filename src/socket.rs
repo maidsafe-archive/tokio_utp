@@ -1621,6 +1621,8 @@ impl Connection {
                 ready.insert(Ready::writable());
             }
         } else if self.state.is_closed() {
+            // when connection is closed we need to unblock read call. The way to do this is
+            // to set "read ready" flag. Then `stream.read_immutable` will return 0 indicating EOF.
             ready = Ready::readable();
         }
 
@@ -1631,7 +1633,12 @@ impl Connection {
 
     // =========
 
+    /// Returns true, if connection should be polled for reads.
     fn is_readable(&self) -> bool {
+        // read_open = true when we have received Fin.
+        // Note that when reads are closed (`read_open = false`), connection is readable.
+        // That's because we want to get `stream.read_immutable()` called and in such case it
+        // returns 0 indicating that connection reads were closed - Fin was received.
         !self.read_open || self.in_queue.is_readable()
     }
 
@@ -2121,6 +2128,26 @@ mod tests {
 
                     assert_eq!(prev_average_delay, -3000);
                 }
+            }
+        }
+
+        mod is_readable {
+            use super::*;
+
+            #[test]
+            fn when_reads_are_closed_it_returns_true() {
+                let mut conn = test_connection();
+                conn.read_open = false;
+
+                assert!(conn.is_readable());
+            }
+
+            #[test]
+            fn when_reads_are_open_but_input_queue_is_emtpy_it_returns_false() {
+                let mut conn = test_connection();
+                conn.read_open = true;
+
+                assert!(!conn.is_readable());
             }
         }
     }
