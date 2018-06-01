@@ -1,28 +1,28 @@
-use {util, TIMESTAMP_MASK};
 use delays::Delays;
 use in_queue::InQueue;
 use out_queue::OutQueue;
 use packet::{self, Packet};
+use {util, TIMESTAMP_MASK};
 
 //use mio::net::UdpSocket;
 use arraydeque::ArrayDeque;
+use future_utils::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use futures::sync::oneshot;
+use futures::{Async, AsyncSink, Future, Sink, Stream};
+use mio::{Ready, Registration, SetReadiness};
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented, Remote, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
-use mio::{Ready, Registration, SetReadiness};
-use futures::{Async, AsyncSink, Future, Sink, Stream};
-use futures::sync::oneshot;
-use future_utils::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use void::Void;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use slab::Slab;
 
-use std::{cmp, fmt, io, mem, u32};
-use std::sync::{Arc, RwLock};
-use std::net::SocketAddr;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use std::{cmp, fmt, io, mem, u32};
 
 /// A uTP socket. Can be used to make outgoing connections.
 pub struct UtpSocket {
@@ -1083,7 +1083,8 @@ impl Inner {
 
         // Iterate in semi-random order so that bandwidth is divided fairly between connections.
         let skip_point = util::rand::<usize>() % self.connection_lookup.len();
-        let tokens = self.connection_lookup
+        let tokens = self
+            .connection_lookup
             .values()
             .skip(skip_point)
             .chain(self.connection_lookup.values().take(skip_point));
@@ -1650,10 +1651,7 @@ impl State {
 
 impl Key {
     fn new(receive_id: u16, addr: SocketAddr) -> Key {
-        Key {
-            receive_id,
-            addr,
-        }
+        Key { receive_id, addr }
     }
 }
 

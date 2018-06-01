@@ -1,10 +1,10 @@
-use UtpSocket;
-use tokio_core::reactor::Core;
-use tokio_io;
+use future_utils::FutureExt;
 use futures::future::{self, Future};
 use futures::Stream;
-use future_utils::FutureExt;
 use std::time::Duration;
+use tokio_core::reactor::Core;
+use tokio_io;
+use UtpSocket;
 
 #[test]
 fn it_receives_data_after_write_shutdown() {

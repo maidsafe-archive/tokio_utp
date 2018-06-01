@@ -1,11 +1,11 @@
 //! Queue of outgoing packets.
 
-use {util, MAX_WINDOW_SIZE};
 use packet::{self, Packet};
+use {util, MAX_WINDOW_SIZE};
 
-use std::{cmp, io};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+use std::{cmp, io};
 
 // TODO:
 //

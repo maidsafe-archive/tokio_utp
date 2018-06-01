@@ -1,11 +1,11 @@
-use {MAX_DELTA_SEQ, MAX_WINDOW_SIZE};
 use packet::{self, Packet};
+use {MAX_DELTA_SEQ, MAX_WINDOW_SIZE};
 
 use bytes::{Buf, BytesMut};
 
-use std::{mem, u16};
-use std::io::{self, Cursor, Read};
 use std::collections::VecDeque;
+use std::io::{self, Cursor, Read};
+use std::{mem, u16};
 
 #[derive(Debug)]
 pub struct InQueue {
@@ -183,7 +183,8 @@ impl InQueue {
 
         // Now, we prune the queue
         for p in &mut self.packets {
-            let keep = p.as_ref()
+            let keep = p
+                .as_ref()
                 .map(|p| in_range(ack_nr, p.seq_nr()))
                 .unwrap_or(false);
 

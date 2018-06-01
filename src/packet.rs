@@ -1,5 +1,5 @@
-use bytes::{BufMut, BytesMut};
 use byteorder::{BigEndian, ByteOrder};
+use bytes::{BufMut, BytesMut};
 use smallvec::SmallVec;
 
 use std::fmt;
@@ -36,6 +36,7 @@ pub enum Type {
     Syn = 4,
 }
 
+#[cfg_attr(rustfmt, rustfmt_skip)]
 const DEFAULT: [u8; 26] = [
     0, 0, 0, 0, 0, 0,   // initial padding so that we can insert selective ack
                         // by moving the header back
@@ -44,7 +45,8 @@ const DEFAULT: [u8; 26] = [
     0, 0, 0, 0,
     255, 255, 255, 255, // Default timestamp difference
     0, 1, 0, 0,         // Default window of 64kb
-    0, 0, 0, 0];
+    0, 0, 0, 0,
+];
 
 const VERSION_MASK: u8 = 0b1111;
 

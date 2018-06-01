@@ -9,8 +9,8 @@ extern crate void;
 
 use tokio_utp::*;
 
-use tokio_core::reactor::Core;
 use futures::{future, Future};
+use tokio_core::reactor::Core;
 use void::Void;
 
 use std::net::SocketAddr;

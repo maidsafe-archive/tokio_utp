@@ -7,10 +7,10 @@ extern crate tokio_utp;
 extern crate unwrap;
 extern crate void;
 
-use tokio_utp::*;
 use futures::{future, Future, Stream};
 use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
+use tokio_utp::*;
 use void::Void;
 
 use std::net::SocketAddr;

@@ -1,13 +1,13 @@
-use UtpSocket;
+use futures::future;
+use futures::{Future, Stream};
+use rand::Rng;
 use std::fs::File;
 use std::io::Write;
 use tokio_core::reactor::Core;
 use tokio_io;
 use tokio_io::AsyncRead;
-use futures::future;
-use futures::{Future, Stream};
-use rand::Rng;
 use util;
+use UtpSocket;
 
 trait FutureExt: Sized + Future + 'static {
     fn sendless_boxed(self) -> Box<Future<Item = Self::Item, Error = Self::Error> + 'static> {

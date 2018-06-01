@@ -39,8 +39,10 @@ extern crate netsim;
 #[cfg(test)]
 mod test;
 
-pub use socket::{Incoming, RawChannel, RawReceiver, UtpListener, UtpSocket, UtpSocketFinalize,
-                 UtpStream, UtpStreamConnect};
+pub use socket::{
+    Incoming, RawChannel, RawReceiver, UtpListener, UtpSocket, UtpSocketFinalize, UtpStream,
+    UtpStreamConnect,
+};
 
 // max window size
 const MAX_WINDOW_SIZE: usize = 64 * 1_024;

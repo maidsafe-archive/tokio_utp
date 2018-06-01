@@ -1,6 +1,6 @@
-use util;
 use super::TIMESTAMP_MASK;
 use std::time::{Duration, Instant};
+use util;
 
 #[derive(Debug, Clone, Default)]
 pub struct Delays {
