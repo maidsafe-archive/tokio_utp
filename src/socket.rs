@@ -1621,6 +1621,8 @@ impl Connection {
                 ready.insert(Ready::writable());
             }
         } else if self.state.is_closed() {
+            // when connection is closed we need to unblock read call. The way to do this is
+            // to set "read ready" flag. Then `stream.read_immutable` will return 0 indicating EOF.
             ready = Ready::readable();
         }
 
@@ -1631,7 +1633,12 @@ impl Connection {
 
     // =========
 
+    /// Returns true, if connection should be polled for reads.
     fn is_readable(&self) -> bool {
+        // read_open = true when we have received Fin.
+        // Note that when reads are closed (`read_open = false`), connection is readable.
+        // That's because we want to get `stream.read_immutable()` called and in such case it
+        // returns 0 indicating that connection reads were closed - Fin was received.
         !self.read_open || self.in_queue.is_readable()
     }
 
@@ -1818,17 +1825,22 @@ mod tests {
             (packets_rx, listener_addr)
         }
 
+        /// Reduce some boilerplate.
+        /// Returns socket inner with some common defaults.
+        fn make_socket_inner(evloop: &Core) -> InnerCell {
+            let handle = evloop.handle();
+            let (_listener_registration, listener_set_readiness) = Registration::new2();
+            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+            Inner::new_shared(&handle, socket, listener_set_readiness)
+        }
+
         mod process_unknown {
             use super::*;
 
             #[test]
             fn when_packet_is_syn_it_schedules_reset_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::syn();
                 packet.set_connection_id(12_345);
@@ -1846,11 +1858,7 @@ mod tests {
             #[test]
             fn when_packet_is_reset_nothing_is_sent_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
 
                 let mut packet = Packet::reset();
                 packet.set_connection_id(12_345);
@@ -1870,12 +1878,9 @@ mod tests {
             fn it_attempts_to_send_all_queued_reset_packets() {
                 let mut evloop = unwrap!(Core::new());
                 let handle = evloop.handle();
+                let inner = make_socket_inner(&evloop);
 
                 let task = future::lazy(|| {
-                    let (_listener_registration, listener_set_readiness) = Registration::new2();
-                    let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                    let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
-
                     let (packets_rx, remote_peer_addr) = wait_for_packets(&handle);
 
                     let mut packet = Packet::reset();
@@ -1910,11 +1915,7 @@ mod tests {
             #[test]
             fn when_listener_is_closed_it_schedules_reset_packet_back() {
                 let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let (_listener_registration, listener_set_readiness) = Registration::new2();
-
-                let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let inner = Inner::new_shared(&handle, socket, listener_set_readiness);
+                let inner = make_socket_inner(&evloop);
                 unwrap!(inner.write()).listener_open = false;
 
                 let mut packet = Packet::syn();
@@ -2121,6 +2122,26 @@ mod tests {
 
                     assert_eq!(prev_average_delay, -3000);
                 }
+            }
+        }
+
+        mod is_readable {
+            use super::*;
+
+            #[test]
+            fn when_reads_are_closed_it_returns_true() {
+                let mut conn = test_connection();
+                conn.read_open = false;
+
+                assert!(conn.is_readable());
+            }
+
+            #[test]
+            fn when_reads_are_open_but_input_queue_is_emtpy_it_returns_false() {
+                let mut conn = test_connection();
+                conn.read_open = true;
+
+                assert!(!conn.is_readable());
             }
         }
     }
