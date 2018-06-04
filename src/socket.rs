@@ -1635,7 +1635,7 @@ impl Connection {
 
     /// Returns true, if connection should be polled for reads.
     fn is_readable(&self) -> bool {
-        // read_open = true when we have received Fin.
+        // read_open = false when we have received Fin.
         // Note that when reads are closed (`read_open = false`), connection is readable.
         // That's because we want to get `stream.read_immutable()` called and in such case it
         // returns 0 indicating that connection reads were closed - Fin was received.
