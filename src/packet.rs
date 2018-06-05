@@ -131,6 +131,11 @@ impl Packet {
         }
     }
 
+    /// Checks if this is acknowledgement packet - type is `State`.
+    pub fn is_ack(&self) -> bool {
+        self.ty() == Type::State
+    }
+
     pub fn set_ty(&mut self, ty: Type) {
         self.data[self.padding] = (ty as u8) << 4 | self.version()
     }
@@ -309,6 +314,29 @@ mod tests {
             assert!(packet.wnd_size() == 65_000);
             assert!(packet.seq_nr() == 100);
             assert!(packet.ack_nr() == 99);
+        }
+
+        mod is_ack {
+            use super::*;
+
+            #[test]
+            fn when_packet_is_state_it_returns_true() {
+                let packet = Packet::state();
+
+                assert!(packet.is_ack());
+            }
+
+            #[test]
+            fn when_packet_is_not_state_it_returns_false() {
+                let packet = Packet::syn();
+                assert!(!packet.is_ack());
+
+                let packet = Packet::fin();
+                assert!(!packet.is_ack());
+
+                let packet = Packet::data(&[1, 2, 3]);
+                assert!(!packet.is_ack());
+            }
         }
     }
 }

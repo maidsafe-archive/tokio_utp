@@ -1265,7 +1265,7 @@ impl Connection {
         let now = Instant::now();
         self.update_delays(now, &packet);
 
-        if packet.ty() == packet::Type::State {
+        if packet.is_ack() {
             // State packets are special, they do not have an associated
             // sequence number, thus do not require ordering. They are only used
             // to ACK packets, which is handled above, and to transition a
