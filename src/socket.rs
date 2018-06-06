@@ -146,8 +146,10 @@ struct Connection {
 
     // False when `shutdown_write` has been called.
     write_open: bool,
-    // False when we've recieved a FIN.
+    // False when we've received a FIN.
     read_open: bool,
+    // True when we've sent FIN, don't send it again.
+    fin_sent: bool,
 
     // Used to signal readiness on the `UtpStream`
     set_readiness: SetReadiness,
@@ -802,8 +804,7 @@ impl Inner {
     fn shutdown_write(&mut self, token: usize) -> io::Result<()> {
         let conn = &mut self.connections[token];
         conn.write_open = false;
-        if !conn.state.is_closed() {
-            conn.out_queue.push(Packet::fin());
+        if conn.schedule_fin() {
             conn.flush(&mut self.shared)?;
         }
         Ok(())
@@ -814,7 +815,7 @@ impl Inner {
             let conn = &mut self.connections[token];
             conn.released = true;
             if !conn.state.is_closed() {
-                conn.out_queue.push(Packet::fin());
+                let _ = conn.schedule_fin();
                 conn.state = State::FinSent;
                 //let _ = conn.flush(&mut self.shared);
             }
@@ -1186,6 +1187,7 @@ impl Connection {
             released: false,
             write_open: true,
             read_open: true,
+            fin_sent: false,
             deadline,
             last_recv_time: now,
             disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
@@ -1388,6 +1390,18 @@ impl Connection {
         }
 
         Ok(true)
+    }
+
+    /// Schedule Fin packet to be sent to remote peer, if it was not schedules yet.
+    /// Returns true, if Fin was scheduled, false otherwise.
+    fn schedule_fin(&mut self) -> bool {
+        if !self.state.is_closed() && !self.fin_sent {
+            self.out_queue.push(Packet::fin());
+            self.fin_sent = true;
+            true
+        } else {
+            false
+        }
     }
 
     fn tick(&mut self, shared: &mut Shared) -> io::Result<Option<(u16, SocketAddr)>> {
@@ -1635,7 +1649,7 @@ impl Connection {
 
     /// Returns true, if connection should be polled for reads.
     fn is_readable(&self) -> bool {
-        // read_open = true when we have received Fin.
+        // read_open = false when we have received Fin.
         // Note that when reads are closed (`read_open = false`), connection is readable.
         // That's because we want to get `stream.read_immutable()` called and in such case it
         // returns 0 indicating that connection reads were closed - Fin was received.
@@ -1796,6 +1810,16 @@ mod tests {
     use super::*;
     use tokio_core::reactor::Core;
 
+    /// Reduces boilerplate and creates connection with some specific parameters.
+    fn test_connection() -> Connection {
+        let key = Key {
+            receive_id: 12_345,
+            addr: addr!("1.2.3.4:5000"),
+        };
+        let (_registration, set_readiness) = Registration::new2();
+        Connection::new_outgoing(key, set_readiness, 12_346)
+    }
+
     mod inner {
         use super::*;
         use futures::future::{self, Loop};
@@ -1931,20 +1955,79 @@ mod tests {
                 assert_eq!(dest_addr, addr!("1.2.3.4:5000"));
             }
         }
+
+        mod shutdown_write {
+            use super::*;
+
+            #[test]
+            fn it_closes_further_writes() {
+                let evloop = unwrap!(Core::new());
+                let inner = make_socket_inner(&evloop);
+                let mut inner = unwrap!(inner.write());
+
+                let conn = test_connection();
+                assert!(conn.write_open);
+                let conn_token = inner.connections.insert(conn);
+
+                unwrap!(inner.shutdown_write(conn_token));
+
+                let conn = &inner.connections[conn_token];
+                assert!(!conn.write_open);
+            }
+
+            #[test]
+            fn when_fin_was_not_sent_yet_it_enqueues_fin_packet() {
+                let evloop = unwrap!(Core::new());
+                let inner = make_socket_inner(&evloop);
+                let mut inner = unwrap!(inner.write());
+
+                let mut conn = test_connection();
+                if let Some(next) = conn.out_queue.next() {
+                    next.sent()
+                } // skip queued Syn packet
+                let conn_token = inner.connections.insert(conn);
+
+                unwrap!(inner.shutdown_write(conn_token));
+
+                let conn = &mut inner.connections[conn_token];
+                if let Some(next) = conn.out_queue.next() {
+                    assert_eq!(next.packet().ty(), packet::Type::Fin);
+                } else {
+                    panic!("Packet expected in out_queue");
+                }
+            }
+        }
+
+        mod close {
+            use super::*;
+
+            #[test]
+            fn when_fin_packet_was_sent_it_does_not_enqueue_another() {
+                let evloop = unwrap!(Core::new());
+                let inner = make_socket_inner(&evloop);
+                let mut inner = unwrap!(inner.write());
+
+                let mut conn = test_connection();
+                if let Some(next) = conn.out_queue.next() {
+                    next.sent()
+                } // skip queued Syn packet
+                let conn_token = inner.connections.insert(conn);
+                unwrap!(inner.shutdown_write(conn_token));
+
+                inner.close(conn_token);
+
+                let conn = &mut inner.connections[conn_token];
+                // skip first queued Fin packet
+                if let Some(next) = conn.out_queue.next() {
+                    next.sent()
+                }
+                assert!(conn.out_queue.next().is_none());
+            }
+        }
     }
 
     mod connection {
         use super::*;
-
-        /// Reduces boilerplate and creates connection with some specific parameters.
-        fn test_connection() -> Connection {
-            let key = Key {
-                receive_id: 12_345,
-                addr: addr!("1.2.3.4:5000"),
-            };
-            let (_registration, set_readiness) = Registration::new2();
-            Connection::new_outgoing(key, set_readiness, 12_346)
-        }
 
         mod tick {
             use super::*;
@@ -2142,6 +2225,60 @@ mod tests {
                 conn.read_open = true;
 
                 assert!(!conn.is_readable());
+            }
+        }
+
+        mod schedule_fin {
+            use super::*;
+
+            mod when_fin_was_not_sent_yet {
+                use super::*;
+
+                #[test]
+                fn it_enqueues_fin_packet() {
+                    let mut conn = test_connection();
+                    // skip queued Syn packet
+                    if let Some(next) = conn.out_queue.next() {
+                        next.sent()
+                    }
+
+                    let _ = conn.schedule_fin();
+
+                    if let Some(next) = conn.out_queue.next() {
+                        assert_eq!(next.packet().ty(), packet::Type::Fin);
+                    } else {
+                        panic!("Packet expected in out_queue");
+                    }
+                }
+
+                #[test]
+                fn it_notes_tha_fin_was_sent() {
+                    let mut conn = test_connection();
+                    assert!(!conn.fin_sent);
+
+                    let _ = conn.schedule_fin();
+
+                    assert!(conn.fin_sent);
+                }
+
+                #[test]
+                fn it_returns_true() {
+                    let mut conn = test_connection();
+
+                    let fin_queued = conn.schedule_fin();
+
+                    assert!(fin_queued);
+                }
+            }
+
+            #[test]
+            fn when_fin_was_already_queued_it_returns_false() {
+                let mut conn = test_connection();
+                let _ = conn.schedule_fin();
+
+                let fin_queued = conn.schedule_fin();
+
+                assert!(!fin_queued);
             }
         }
     }
