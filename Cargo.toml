@@ -35,4 +35,4 @@ hamcrest = "~0.1.5"
 default = ["netsim"]
 [target."cfg(target_os = \"linux\")".dependencies.netsim]
 optional = true
-version = "~0.2.1"
+version = "~0.2.2"
