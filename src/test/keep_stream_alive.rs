@@ -4,7 +4,7 @@ use futures::future;
 use futures::future::Loop;
 use futures::{Future, Stream};
 use netsim::node::Ipv4Node;
-use netsim::{self, SubnetV4};
+use netsim::{self, Ipv4Range};
 use std;
 use std::fs::File;
 use std::io::Write;
@@ -16,7 +16,7 @@ use util;
 use void::ResultVoidExt;
 use UtpSocket;
 
-const KEEP_ALIVE_PERIOD_SECS: u64 = 60;
+const KEEP_ALIVE_PERIOD_SECS: u64 = 20;
 const DATA_LEN: usize = 1024;
 
 #[test]
@@ -25,11 +25,13 @@ fn keep_stream_alive() {
 
     let mut core = unwrap!(Core::new());
     let handle = core.handle();
+    let network = netsim::Network::new(&handle);
+    let network_handle = network.handle();
 
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 
     let res = core.run(future::lazy(|| {
-        let node_a = netsim::node::endpoint_v4(move |ip| {
+        let node_a = netsim::node::ipv4::machine(move |ip| {
             let mut core = unwrap!(Core::new());
             let handle = core.handle();
             let addr = SocketAddr::V4(SocketAddrV4::new(ip, 0));
@@ -89,7 +91,7 @@ fn keep_stream_alive() {
             res.void_unwrap()
         });
 
-        let node_b = netsim::node::endpoint_v4(move |ip| {
+        let node_b = netsim::node::ipv4::machine(move |ip| {
             let mut core = unwrap!(Core::new());
             let handle = core.handle();
             let addr = SocketAddr::V4(SocketAddrV4::new(ip, 1234));
@@ -115,14 +117,22 @@ fn keep_stream_alive() {
             res.void_unwrap()
         });
 
-        let node_a = { node_a.latency(Duration::from_millis(150), Duration::from_millis(10)) };
+        let node_a = {
+            node_a
+                .latency(Duration::from_millis(150), Duration::from_millis(10))
+                .packet_loss(0.2, Duration::from_millis(10))
+        };
 
-        let node_b = { node_b.latency(Duration::from_millis(150), Duration::from_millis(10)) };
+        let node_b = {
+            node_b
+                .latency(Duration::from_millis(150), Duration::from_millis(10))
+                .packet_loss(0.2, Duration::from_millis(10))
+        };
 
-        let (spawn_complete, _plug) = netsim::spawn::network_v4(
-            &handle,
-            SubnetV4::global(),
-            netsim::node::router_v4((node_a, node_b)),
+        let (spawn_complete, _plug) = netsim::spawn::ipv4_tree(
+            &network_handle,
+            Ipv4Range::global(),
+            netsim::node::ipv4::router((node_a, node_b)),
         );
 
         spawn_complete
