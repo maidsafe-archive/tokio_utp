@@ -146,10 +146,12 @@ struct Connection {
 
     // False when `shutdown_write` has been called.
     write_open: bool,
-    // False when we've received a FIN.
-    read_open: bool,
-    // True when we've sent FIN, don't send it again.
-    fin_sent: bool,
+    // Set to Fin packet sequence number when we've sent FIN, don't send more Fin packets.
+    fin_sent: Option<u16>,
+    // Stores sequence number of Fin packet that we received from remote peer.
+    fin_received: Option<u16>,
+    // True when we receive ack for Fin that we sent.
+    fin_sent_acked: bool,
 
     // Used to signal readiness on the `UtpStream`
     set_readiness: SetReadiness,
@@ -188,6 +190,7 @@ struct Connection {
     // Probability of dropping is loss_rate / u32::MAX
     //#[cfg(test)]
     //loss_rate: u32,
+    closed_tx: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -211,6 +214,8 @@ enum State {
     FinSent,
     // The connection has been reset by the remote.
     Reset,
+    // Connection has been closed and waiting to be removed.
+    Closed,
 }
 
 const DEFAULT_RAW_DATA_MAX: usize = 1_024 * 1_024;
@@ -566,7 +571,7 @@ impl UtpStream {
         match connection.in_queue.read(dst) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 self.registration.need_read();
-                if connection.state == State::Connected && connection.read_open {
+                if connection.state == State::Connected && connection.read_open() {
                     connection.update_readiness()?;
                     Err(io::ErrorKind::WouldBlock.into())
                 } else if connection.state == State::Reset {
@@ -621,6 +626,22 @@ impl UtpStream {
         connection.disconnect_timeout_secs =
             cmp::min(u64::from(u32::MAX), duration.as_secs()) as u32;
     }
+
+    /// Returns a future that waits until connection is gracefully shutdown: both peers have sent
+    /// `Fin` packets and received corresponding acknowledgements.
+    pub fn finalize(self) -> UtpStreamFinalize {
+        let (signal_tx, signal_rx) = oneshot::channel();
+        {
+            let mut inner = unwrap!(self.inner.write());
+            let conn = &mut inner.connections[self.token];
+            conn.set_closed_tx(signal_tx);
+        }
+
+        UtpStreamFinalize {
+            conn_closed: signal_rx,
+            _stream: self,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -671,6 +692,26 @@ impl Evented for UtpStream {
     }
 }
 */
+
+/// A future that resolves once the uTP connection is gracefully closed. Created via
+/// `UtpStream::finalize`.
+pub struct UtpStreamFinalize {
+    /// Waits for signal, ignores the value.
+    conn_closed: oneshot::Receiver<()>,
+    /// Hold stream so it wouldn't be dropped.
+    _stream: UtpStream,
+}
+
+impl Future for UtpStreamFinalize {
+    type Item = ();
+    type Error = Void;
+
+    fn poll(&mut self) -> Result<Async<()>, Void> {
+        // it can't fail cause `UtpStreamFinalize` holds `UtpStream` which makes sure `Inner`
+        // and `Connection` instances are not dropped and `Connection` holds channel transmitter.
+        Ok(unwrap!(self.conn_closed.poll()))
+    }
+}
 
 impl Inner {
     fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
@@ -1186,8 +1227,9 @@ impl Connection {
             their_delays: Delays::new(),
             released: false,
             write_open: true,
-            read_open: true,
-            fin_sent: false,
+            fin_sent: None,
+            fin_sent_acked: false,
+            fin_received: None,
             deadline,
             last_recv_time: now,
             disconnect_timeout_secs: DEFAULT_DISCONNECT_TIMEOUT_SECS,
@@ -1201,6 +1243,7 @@ impl Connection {
             slow_start: true,
             //#[cfg(test)]
             //loss_rate: 0,
+            closed_tx: None,
         }
     }
 
@@ -1213,7 +1256,7 @@ impl Connection {
         packet.set_connection_id(key.receive_id);
 
         // Queue the syn packet
-        out_queue.push(packet);
+        let _ = out_queue.push(packet);
 
         Self::new(
             State::SynSent,
@@ -1240,9 +1283,25 @@ impl Connection {
         )
     }
 
+    /// Checks if connection is readable.
+    /// Reads are closed when we receive Fin packet.
+    fn read_open(&self) -> bool {
+        self.fin_received.is_none()
+    }
+
     fn update_local_window(&mut self) {
         self.out_queue
             .set_local_window(self.in_queue.local_window());
+    }
+
+    /// Sets connection closed signal transmitter which is used to notify graceful connnection
+    /// shutdown.
+    fn set_closed_tx(&mut self, closed_tx: oneshot::Sender<()>) {
+        if self.state == State::Closed {
+            let _ = closed_tx.send(());
+        } else {
+            self.closed_tx = Some(closed_tx);
+        }
     }
 
     /// Process an inbound packet for the connection
@@ -1265,17 +1324,8 @@ impl Connection {
         let now = Instant::now();
         self.update_delays(now, &packet);
 
-        if packet.ty() == packet::Type::State {
-            // State packets are special, they do not have an associated
-            // sequence number, thus do not require ordering. They are only used
-            // to ACK packets, which is handled above, and to transition a
-            // connection into the connected state.
-            if self.state == State::SynSent {
-                self.in_queue.set_initial_ack_nr(packet.seq_nr());
-                self.out_queue.set_peer_window(packet.wnd_size());
-
-                self.state = State::Connected;
-            }
+        if packet.is_ack() {
+            self.process_ack(&packet);
         } else {
             // TODO: validate the packet's ack_nr
 
@@ -1293,22 +1343,7 @@ impl Connection {
         trace!("polling from in_queue");
 
         while let Some(packet) = self.in_queue.poll() {
-            trace!("process; packet={:?}; state={:?}", packet, self.state);
-
-            // Update the peer window size
-            self.out_queue.set_peer_window(packet.wnd_size());
-
-            // At this point, we only receive CTL frames. Data is held in the
-            // queue
-            match packet.ty() {
-                packet::Type::Reset => {
-                    self.state = State::Reset;
-                }
-                packet::Type::Fin => {
-                    self.read_open = false;
-                }
-                packet::Type::Data | packet::Type::Syn | packet::Type::State => unreachable!(),
-            }
+            self.process_queued(&packet);
         }
 
         trace!(
@@ -1334,6 +1369,51 @@ impl Connection {
         Ok(self.is_finalized())
     }
 
+    /// Handles `State` packets.
+    fn process_ack(&mut self, packet: &Packet) {
+        // State packets are special, they do not have an associated sequence number, thus do not
+        // require ordering. They are only used to ACK packets, which is handled above, and to
+        // transition a connection into the connected state.
+        if self.state == State::SynSent {
+            self.in_queue.set_initial_ack_nr(packet.seq_nr());
+            self.out_queue.set_peer_window(packet.wnd_size());
+
+            self.state = State::Connected;
+        }
+        if self.acks_fin_sent(packet) {
+            self.fin_sent_acked = true;
+            if self.fin_received.is_some() {
+                self.notify_conn_closed();
+            }
+        }
+    }
+
+    /// Processes packet that was already queued.
+    fn process_queued(&mut self, packet: &Packet) {
+        trace!("process; packet={:?}; state={:?}", packet, self.state);
+
+        // Update the peer window size
+        self.out_queue.set_peer_window(packet.wnd_size());
+
+        // At this point, we only receive CTL frames. Data is held in the queue
+        match packet.ty() {
+            packet::Type::Reset => {
+                self.state = State::Reset;
+            }
+            packet::Type::Fin => {
+                self.fin_received = Some(packet.seq_nr());
+            }
+            packet::Type::Data | packet::Type::Syn | packet::Type::State => unreachable!(),
+        }
+    }
+
+    /// Checks if given packet acks Fin we sent.
+    fn acks_fin_sent(&self, packet: &Packet) -> bool {
+        debug_assert!(packet.is_ack());
+        self.fin_sent
+            .map_or(false, |seq_nr| seq_nr == packet.ack_nr())
+    }
+
     /// Returns true, if socket is still ready to write.
     fn flush(&mut self, shared: &mut Shared) -> io::Result<bool> {
         let mut sent = false;
@@ -1352,6 +1432,19 @@ impl Connection {
                 self.key.addr,
                 next.packet()
             );
+
+            // this packet acks Fin we received before.
+            if next.packet().is_ack()
+                && self
+                    .fin_received
+                    .map_or(false, |seq_nr| seq_nr == next.packet().ack_nr())
+                && self.fin_sent_acked
+            {
+                if let Some(closed_tx) = self.closed_tx.take() {
+                    let _ = closed_tx.send(());
+                }
+                self.state = State::Closed;
+            }
 
             // We randomly drop packets when testing.
             //#[cfg(test)]
@@ -1395,13 +1488,21 @@ impl Connection {
     /// Schedule Fin packet to be sent to remote peer, if it was not schedules yet.
     /// Returns true, if Fin was scheduled, false otherwise.
     fn schedule_fin(&mut self) -> bool {
-        if !self.state.is_closed() && !self.fin_sent {
-            self.out_queue.push(Packet::fin());
-            self.fin_sent = true;
+        if !self.state.is_closed() && self.fin_sent.is_none() {
+            let seq_nr = self.out_queue.push(Packet::fin());
+            self.fin_sent = Some(seq_nr);
             true
         } else {
             false
         }
+    }
+
+    /// Wakes up `UtpStreamFinalize` future.
+    fn notify_conn_closed(&mut self) {
+        if let Some(closed_tx) = self.closed_tx.take() {
+            let _ = closed_tx.send(());
+        }
+        self.state = State::Closed;
     }
 
     fn tick(&mut self, shared: &mut Shared) -> io::Result<Option<(u16, SocketAddr)>> {
@@ -1649,11 +1750,10 @@ impl Connection {
 
     /// Returns true, if connection should be polled for reads.
     fn is_readable(&self) -> bool {
-        // read_open = false when we have received Fin.
-        // Note that when reads are closed (`read_open = false`), connection is readable.
+        // Note that when reads are closed (`read_open() -> false`), connection is readable.
         // That's because we want to get `stream.read_immutable()` called and in such case it
         // returns 0 indicating that connection reads were closed - Fin was received.
-        !self.read_open || self.in_queue.is_readable()
+        !self.read_open() || self.in_queue.is_readable()
     }
 
     fn is_writable(&self) -> bool {
@@ -1662,9 +1762,11 @@ impl Connection {
 }
 
 impl State {
+    /// Returns `true`, if connection is being closed or is already closed and we should not
+    /// send any more data over this connection
     fn is_closed(&self) -> bool {
         match *self {
-            State::FinSent | State::Reset => true,
+            State::FinSent | State::Reset | State::Closed => true,
             _ => false,
         }
     }
@@ -2208,21 +2310,41 @@ mod tests {
             }
         }
 
+        mod read_open {
+            use super::*;
+
+            #[test]
+            fn when_fin_was_not_received_it_returns_true() {
+                let conn = test_connection();
+                assert!(conn.fin_received.is_none());
+
+                assert!(conn.read_open());
+            }
+
+            #[test]
+            fn when_fin_received_it_returns_false() {
+                let mut conn = test_connection();
+                conn.fin_received = Some(123);
+
+                assert!(!conn.read_open());
+            }
+        }
+
         mod is_readable {
             use super::*;
 
             #[test]
             fn when_reads_are_closed_it_returns_true() {
                 let mut conn = test_connection();
-                conn.read_open = false;
+                conn.fin_received = Some(123);
 
                 assert!(conn.is_readable());
             }
 
             #[test]
             fn when_reads_are_open_but_input_queue_is_emtpy_it_returns_false() {
-                let mut conn = test_connection();
-                conn.read_open = true;
+                let conn = test_connection();
+                assert!(conn.fin_received.is_none());
 
                 assert!(!conn.is_readable());
             }
@@ -2252,13 +2374,13 @@ mod tests {
                 }
 
                 #[test]
-                fn it_notes_tha_fin_was_sent() {
+                fn it_notes_that_fin_was_sent() {
                     let mut conn = test_connection();
-                    assert!(!conn.fin_sent);
+                    assert!(conn.fin_sent.is_none());
 
                     let _ = conn.schedule_fin();
 
-                    assert!(conn.fin_sent);
+                    assert!(conn.fin_sent.is_some());
                 }
 
                 #[test]
@@ -2279,6 +2401,136 @@ mod tests {
                 let fin_queued = conn.schedule_fin();
 
                 assert!(!fin_queued);
+            }
+        }
+
+        mod acks_fin_sent {
+            use super::*;
+
+            #[test]
+            fn when_fin_was_not_sent_yet_it_returns_false() {
+                let conn = test_connection();
+                assert!(conn.fin_sent.is_none());
+
+                let acks = conn.acks_fin_sent(&Packet::state());
+
+                assert!(!acks);
+            }
+
+            mod when_fin_was_sent {
+                use super::*;
+
+                #[test]
+                fn when_ack_packet_is_not_for_our_fin_it_returns_false() {
+                    let mut conn = test_connection();
+                    conn.fin_sent = Some(5);
+                    let mut packet = Packet::state();
+                    packet.set_ack_nr(4);
+
+                    let acks = conn.acks_fin_sent(&packet);
+
+                    assert!(!acks);
+                }
+
+                #[test]
+                fn when_ack_packet_is_or_our_fin_it_returns_true() {
+                    let mut conn = test_connection();
+                    conn.fin_sent = Some(5);
+                    let mut packet = Packet::state();
+                    packet.set_ack_nr(5);
+
+                    let acks = conn.acks_fin_sent(&packet);
+
+                    assert!(acks);
+                }
+            }
+        }
+
+        mod process_ack {
+            use super::*;
+
+            mod when_packet_acks_our_fin_packet {
+                use super::*;
+
+                #[test]
+                fn it_notes_that_our_fin_was_acked() {
+                    let mut conn = test_connection();
+                    conn.fin_sent = Some(5);
+                    assert!(!conn.fin_sent_acked);
+
+                    let mut packet = Packet::state();
+                    packet.set_ack_nr(5);
+                    conn.process_ack(&packet);
+
+                    assert!(conn.fin_sent_acked);
+                }
+
+                #[test]
+                fn when_fin_was_received_connection_state_is_changed_to_closed() {
+                    let mut conn = test_connection();
+                    conn.fin_sent = Some(5);
+                    conn.fin_received = Some(123);
+                    assert!(!conn.fin_sent_acked);
+
+                    let mut packet = Packet::state();
+                    packet.set_ack_nr(5);
+                    conn.process_ack(&packet);
+
+                    assert_eq!(conn.state, State::Closed);
+                }
+            }
+        }
+
+        mod process_queued {
+            use super::*;
+
+            #[test]
+            fn when_packet_is_fin_it_saves_its_sequence_number() {
+                let mut conn = test_connection();
+                assert!(conn.fin_received.is_none());
+                let mut fin_packet = Packet::fin();
+                fin_packet.set_seq_nr(123);
+
+                conn.process_queued(&fin_packet);
+
+                assert_eq!(conn.fin_received, Some(123));
+            }
+        }
+
+        mod set_closed_tx {
+            use super::*;
+
+            #[test]
+            fn when_connection_is_already_closed_it_notifies_via_given_transmitter() {
+                let mut conn = test_connection();
+                conn.state = State::Closed;
+
+                let (closed_tx, closed_rx) = oneshot::channel();
+                conn.set_closed_tx(closed_tx);
+
+                unwrap!(closed_rx.wait());
+            }
+        }
+    }
+
+    mod state {
+        use super::*;
+
+        #[test]
+        fn is_closed_returns_true_for_states_when_we_shouldnt_send_data_over_connection() {
+            let closing_states = vec![State::FinSent, State::Reset, State::Closed];
+
+            for state in closing_states {
+                assert!(state.is_closed());
+            }
+        }
+
+        #[test]
+        fn is_closed_returns_false_for_states_when_we_can_send_data_over_connection() {
+            let closing_states = vec![State::SynSent, State::SynRecv, State::Connected];
+
+            for state in closing_states {
+                assert!(!state.is_closed());
             }
         }
     }

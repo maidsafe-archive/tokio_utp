@@ -244,8 +244,9 @@ impl OutQueue {
         }
     }
 
-    /// Push an outbound packet into the queue
-    pub fn push(&mut self, mut packet: Packet) {
+    /// Push an outbound packet into the queue.
+    /// Assigns sequence number for given packet and returns it.
+    pub fn push(&mut self, mut packet: Packet) -> u16 {
         assert!(packet.ty() != packet::Type::State);
 
         // SYN packets are special and will have the connection ID already
@@ -266,6 +267,8 @@ impl OutQueue {
             last_sent_at: None,
             acked: false,
         });
+
+        self.state.seq_nr
     }
 
     pub fn next(&mut self) -> Option<Next> {
@@ -444,5 +447,23 @@ impl<'a> Next<'a> {
         }
 
         self.state.last_ack = self.state.local_ack;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod push {
+        use super::*;
+
+        #[test]
+        fn it_returns_sequence_number_assigned_to_packet() {
+            let mut out_packets = OutQueue::new(123, 1, None);
+
+            let seq_nr = out_packets.push(Packet::fin());
+
+            assert_eq!(seq_nr, 2);
+        }
     }
 }
