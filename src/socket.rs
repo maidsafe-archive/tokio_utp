@@ -1324,24 +1324,20 @@ impl Connection {
         let now = Instant::now();
         self.update_delays(now, &packet);
 
-        if packet.is_ack() {
+        let packet_accepted = if packet.is_ack() {
             self.process_ack(&packet);
+            true
         } else {
             // TODO: validate the packet's ack_nr
 
             // Add the packet to the inbound queue. This handles ordering
             trace!("inqueue -- push packet");
-            if !self.in_queue.push(packet) {
-                // Invalid packet, avoid any further processing
-                trace!("invalid packet");
-                return Ok(false);
-            }
-        }
+            self.in_queue.push(packet)
+        };
 
         // TODO: count duplicate ACK counter
 
         trace!("polling from in_queue");
-
         while let Some(packet) = self.in_queue.poll() {
             self.process_queued(&packet);
         }
@@ -1357,8 +1353,9 @@ impl Connection {
         self.out_queue.set_local_ack(ack_nr, selective_acks);
         self.last_recv_time = Instant::now();
 
-        // Reset the timeout
-        self.reset_timeout();
+        if packet_accepted {
+            self.reset_timeout();
+        }
 
         // Flush out queue
         self.flush(shared)?;
