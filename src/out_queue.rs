@@ -60,12 +60,52 @@ struct State {
     their_delay: u32,
 }
 
+impl State {
+    fn new(connection_id: u16, seq_nr: u16, local_ack: Option<u16>) -> Self {
+        State {
+            connection_id,
+            seq_nr,
+            local_ack,
+            selective_acks: [0; 4],
+            last_ack: None,
+            local_window: MAX_WINDOW_SIZE as u32,
+            created_at: Instant::now(),
+            their_delay: 0,
+        }
+    }
+}
+
+/// Outgoing packets queue entry.
 #[derive(Debug)]
 struct Entry {
     packet: Packet,
     num_sends: u32,
     last_sent_at: Option<Instant>,
     acked: bool,
+}
+
+impl Entry {
+    fn new(packet: Packet) -> Self {
+        Entry {
+            packet,
+            num_sends: 0,
+            last_sent_at: None,
+            acked: false,
+        }
+    }
+
+    /// Checks this packet entry is acknowledged by given ack information.
+    fn acked_by(&self, ack_nr: u16, selective_acks: &[u8]) -> bool {
+        let seq_nr = self.packet.seq_nr();
+        ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
+            match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
+                Some(index) => {
+                    selective_acks.get(index / 8).cloned().unwrap_or(0) & (1 << (index % 8)) != 0
+                }
+                None => false,
+            }
+        }
+    }
 }
 
 pub struct Next<'a> {
@@ -89,16 +129,7 @@ impl OutQueue {
     pub fn new(connection_id: u16, seq_nr: u16, local_ack: Option<u16>) -> OutQueue {
         OutQueue {
             packets: VecDeque::new(),
-            state: State {
-                connection_id,
-                seq_nr,
-                local_ack,
-                selective_acks: [0; 4],
-                last_ack: None,
-                local_window: MAX_WINDOW_SIZE as u32,
-                created_at: Instant::now(),
-                their_delay: 0,
-            },
+            state: State::new(connection_id, seq_nr, local_ack),
             rtt: 0,
             rtt_variance: 0,
             // Start the max window at the packet size
@@ -129,6 +160,9 @@ impl OutQueue {
         self.peer_window = val;
     }
 
+    /// Acknowledges packets in out queue - acked packets are removed from the queue.
+    /// Returns acked bytes and minimum round trip time - time between when packet was sent and
+    /// when ack was received for it.
     pub fn set_their_ack(
         &mut self,
         ack_nr: u16,
@@ -140,23 +174,14 @@ impl OutQueue {
 
         let mut packet_index = 0;
         loop {
-            let pop = {
+            let acked = {
                 let entry = match self.packets.get(packet_index) {
                     Some(entry) => entry,
                     None => break,
                 };
-                let seq_nr = entry.packet.seq_nr();
-                ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
-                    match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
-                        Some(index) => {
-                            selective_acks.get(index / 8).cloned().unwrap_or(0) & (1 << (index % 8))
-                                != 0
-                        }
-                        None => false,
-                    }
-                }
+                entry.acked_by(ack_nr, selective_acks)
             };
-            if !pop {
+            if !acked {
                 packet_index += 1;
                 continue;
             }
@@ -185,23 +210,31 @@ impl OutQueue {
                     .unwrap_or(packet_rtt),
             );
 
+            // The `rtt` and `rtt_variance` are only updated for packets that were sent only once.
+            // This avoids problems with figuring out which packet was acked, the first or the
+            // second one.
             if p.num_sends == 1 {
-                // Use the packet to update rtt & rtt_variance
-                let packet_rtt = util::as_ms(packet_rtt);
-                let delta = (self.rtt as i64 - packet_rtt as i64).abs();
-
-                self.rtt_variance += (delta - self.rtt_variance) / 4;
-
-                if self.rtt >= packet_rtt {
-                    self.rtt -= (self.rtt - packet_rtt) / 8;
-                } else {
-                    self.rtt += (packet_rtt - self.rtt) / 8;
-                }
+                self.recalc_rtt(packet_rtt);
             }
         }
         min_rtt.map(|rtt| (acked_bytes, rtt))
     }
 
+    fn recalc_rtt(&mut self, packet_rtt: Duration) {
+        // Use the packet to update rtt & rtt_variance
+        let packet_rtt = util::as_ms(packet_rtt);
+        let delta = (self.rtt as i64 - packet_rtt as i64).abs();
+
+        self.rtt_variance += (delta - self.rtt_variance) / 4;
+
+        if self.rtt >= packet_rtt {
+            self.rtt -= (self.rtt - packet_rtt) / 8;
+        } else {
+            self.rtt += (packet_rtt - self.rtt) / 8;
+        }
+    }
+
+    /// Sets local window size in bytes that will be included in every outgoing packet.
     pub fn set_local_window(&mut self, val: usize) {
         assert!(val <= ::std::u32::MAX as usize);
         self.state.local_window = val as u32;
@@ -260,17 +293,13 @@ impl OutQueue {
 
         // Set the sequence number
         packet.set_seq_nr(self.state.seq_nr);
-
-        self.packets.push_back(Entry {
-            packet,
-            num_sends: 0,
-            last_sent_at: None,
-            acked: false,
-        });
+        self.packets.push_back(Entry::new(packet));
 
         self.state.seq_nr
     }
 
+    /// Returns next packet to be sent out.
+    /// If there are already more packets in flight that the peer can receive, returns `None`.
     pub fn next(&mut self) -> Option<Next> {
         let ts = self.timestamp();
         let diff = self.state.their_delay;
@@ -306,10 +335,7 @@ impl OutQueue {
             entry.packet.set_wnd_size(wnd_size);
             entry.packet.set_selective_acks(selective_acks);
 
-            return Some(Next {
-                item: Item::Entry(entry),
-                state: &mut self.state,
-            });
+            return Some(Next::entry(entry, &mut self.state));
         }
 
         if self.state.local_ack != self.state.last_ack {
@@ -410,6 +436,7 @@ impl OutQueue {
         self.remaining_capacity() > MAX_HEADER_SIZE
     }
 
+    /// Total bytes of packets that were sent, but not acked yet.
     fn in_flight(&self) -> usize {
         // TODO: Don't iterate each time
         self.packets
@@ -430,6 +457,13 @@ impl OutQueue {
 }
 
 impl<'a> Next<'a> {
+    fn entry(entry: &'a mut Entry, state: &'a mut State) -> Self {
+        Next {
+            item: Item::Entry(entry),
+            state,
+        }
+    }
+
     pub fn packet(&self) -> &Packet {
         match self.item {
             Item::Entry(ref e) => &e.packet,
@@ -454,16 +488,177 @@ impl<'a> Next<'a> {
 mod tests {
     use super::*;
 
-    mod push {
+    mod entry {
         use super::*;
 
-        #[test]
-        fn it_returns_sequence_number_assigned_to_packet() {
-            let mut out_packets = OutQueue::new(123, 1, None);
+        mod acked_by {
+            use super::*;
 
-            let seq_nr = out_packets.push(Packet::fin());
+            #[test]
+            fn when_ack_nr_matches_packet_seq_nr_it_returns_true() {
+                let mut packet = Packet::default();
+                packet.set_seq_nr(15);
+                let entry = Entry::new(packet);
 
-            assert_eq!(seq_nr, 2);
+                let acks = entry.acked_by(15, &[]);
+
+                assert!(acks);
+            }
+
+            #[test]
+            fn when_ack_nr_is_greater_than_seq_nr_it_returns_true() {
+                let mut packet = Packet::default();
+                packet.set_seq_nr(15);
+                let entry = Entry::new(packet);
+
+                let acks = entry.acked_by(20, &[]);
+
+                assert!(acks);
+            }
+
+            mod when_ack_nr_is_smaller_than_seq_nr {
+                use super::*;
+
+                #[test]
+                fn when_selective_acks_are_empty_it_returns_false() {
+                    let mut packet = Packet::default();
+                    packet.set_seq_nr(15);
+                    let entry = Entry::new(packet);
+
+                    let acks = entry.acked_by(14, &[]);
+
+                    assert!(!acks);
+                }
+
+                #[test]
+                fn when_seq_and_ack_nr_difference_is_encoded_in_selective_acks_it_returns_true() {
+                    let mut packet = Packet::default();
+                    packet.set_seq_nr(100);
+                    let entry = Entry::new(packet);
+
+                    let acks = entry.acked_by(90, &[0, 1, 0, 0]);
+
+                    assert!(acks);
+                }
+            }
+        }
+    }
+
+    mod next {
+        use super::*;
+
+        mod sent {
+            use super::*;
+
+            #[test]
+            fn it_sets_packet_sent_time() {
+                let mut entry = Entry::new(Packet::fin());
+                let mut state = State::new(123, 1, Some(5000));
+
+                {
+                    let next = Next::entry(&mut entry, &mut state);
+
+                    next.sent();
+                }
+
+                assert!(entry.last_sent_at.is_some());
+            }
+        }
+    }
+
+    mod out_queue {
+        use super::*;
+
+        mod push {
+            use super::*;
+
+            #[test]
+            fn it_returns_sequence_number_assigned_to_packet() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+
+                let seq_nr = out_packets.push(Packet::fin());
+
+                assert_eq!(seq_nr, 2);
+            }
+        }
+
+        mod set_their_ack {
+            use super::*;
+
+            #[test]
+            fn when_queue_is_empty_it_returns_none() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+
+                let acked = out_packets.set_their_ack(1, &[], Instant::now());
+
+                assert!(acked.is_none());
+            }
+        }
+
+        mod in_flight {
+            use super::*;
+
+            #[test]
+            fn when_queue_is_empty_it_returns_0() {
+                let out_packets = OutQueue::new(123, 1, None);
+
+                assert_eq!(out_packets.in_flight(), 0);
+            }
+
+            #[test]
+            fn it_returns_sum_of_sent_packet_sizes_in_bytes() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+                let _ = out_packets.push(Packet::fin());
+                let _ = out_packets.push(Packet::data(b"12345"));
+                while let Some(entry) = out_packets.next() {
+                    entry.sent();
+                }
+
+                assert_eq!(out_packets.in_flight(), 45);
+            }
+        }
+
+        mod next {
+            use super::*;
+
+            #[test]
+            fn it_returns_first_packet_that_was_not_sent_yet() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+                let _ = out_packets.push(Packet::data(b"12345"));
+                let _ = out_packets.push(Packet::fin());
+
+                let next_entry = unwrap!(out_packets.next());
+
+                assert_eq!(next_entry.packet().ty(), packet::Type::Data);
+            }
+
+            #[test]
+            fn when_no_packets_in_flight_if_next_packet_len_exceeds_peer_window_it_returns_none() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+                let _ = out_packets.push(Packet::data(b"12345"));
+                out_packets.set_peer_window(5);
+
+                let next_entry = out_packets.next();
+
+                assert!(next_entry.is_none());
+            }
+
+            #[test]
+            fn next_packet_len_plus_packets_in_flight_exceeds_peer_window_it_returns_none() {
+                let mut out_packets = OutQueue::new(123, 1, None);
+                // simulate some packets in-flight
+                let _ = out_packets.push(Packet::data(b"12345"));
+                while let Some(entry) = out_packets.next() {
+                    entry.sent();
+                }
+
+                let _ = out_packets.push(Packet::data(b"12345"));
+                out_packets.set_peer_window(5);
+
+                let next_entry = out_packets.next();
+
+                assert!(next_entry.is_none());
+            }
         }
     }
 }
