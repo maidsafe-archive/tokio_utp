@@ -7,20 +7,20 @@ os:
   - osx
 language: rust
 rust:
-  - 1.26.1
-  - nightly-2018-05-29
+  - 1.26.2
+  - nightly-2018-06-10
 sudo: false
 cache:
   cargo: true
 before_script:
   - curl -sSL https://github.com/maidsafe/QA/raw/master/travis/cargo_install.sh > cargo_install.sh
   - bash cargo_install.sh cargo-prune;
-    if [ "${TRAVIS_RUST_VERSION}" = nightly-2018-05-29 ] && [ "${TRAVIS_OS_NAME}" = linux ]; then
-      rustup component add rustfmt-preview --toolchain nightly-2018-05-29 &&
-      bash cargo_install.sh clippy 0.0.206;
+    if [ "${TRAVIS_RUST_VERSION}" = nightly-2018-06-10 ] && [ "${TRAVIS_OS_NAME}" = linux ]; then
+      rustup component add rustfmt-preview --toolchain nightly-2018-06-10 &&
+      bash cargo_install.sh clippy 0.0.207;
     fi
 script:
-  - if [ "${TRAVIS_RUST_VERSION}" = 1.26.1 ]; then
+  - if [ "${TRAVIS_RUST_VERSION}" = 1.26.2 ]; then
       (
         set -x;
         cargo test --no-default-features --release --verbose
