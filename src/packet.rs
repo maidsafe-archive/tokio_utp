@@ -49,6 +49,7 @@ const DEFAULT: [u8; 26] = [
 ];
 
 const VERSION_MASK: u8 = 0b1111;
+const EXT_SELECTIVE_ACK: u8 = 1; // selective ack extension code
 
 impl Packet {
     pub fn parse(bytes: BytesMut) -> Result<Packet, BytesMut> {
@@ -144,6 +145,11 @@ impl Packet {
         self.data[self.padding] & VERSION_MASK
     }
 
+    #[cfg(test)]
+    pub fn extension(&self) -> u8 {
+        self.data[self.padding + 1]
+    }
+
     pub fn connection_id(&self) -> u16 {
         BigEndian::read_u16(&self.data[self.padding + 2..self.padding + 4])
     }
@@ -220,6 +226,9 @@ impl Packet {
         self.as_slice().len()
     }
 
+    /// NOTE, that it only works when `padding` is 6.
+    /// Only 4 byte selective ACKs are allowed. Although, 4x should be possible too.
+    /// See: http://www.bittorrent.org/beps/bep_0029.html#selective-ack
     pub fn set_selective_acks(&mut self, selective_acks: [u8; 4]) {
         if selective_acks != [0; 4] {
             if self.padding == 6 {
@@ -227,7 +236,7 @@ impl Packet {
                 for i in 0..20 {
                     self.data[i] = self.data[i + 6];
                 }
-                self.data[1] = 1;
+                self.data[1] = EXT_SELECTIVE_ACK;
                 self.data[20] = 0;
                 self.data[21] = 4;
             }
@@ -336,6 +345,64 @@ mod tests {
 
                 let packet = Packet::data(&[1, 2, 3]);
                 assert!(!packet.is_ack());
+            }
+        }
+
+        mod set_selective_acks {
+            use super::*;
+
+            #[test]
+            fn setter_and_getter_are_symmetric() {
+                let mut packet = Packet::default();
+
+                packet.set_selective_acks([1, 2, 3, 4]);
+                let selective_acks = packet.selective_acks();
+
+                assert_eq!(selective_acks, SmallVec::from_buf([1, 2, 3, 4]));
+            }
+
+            mod when_padding_is_6 {
+                use super::*;
+
+                #[test]
+                fn it_sets_padding_to_0() {
+                    let mut packet = Packet::default();
+                    assert_eq!(packet.padding, 6);
+
+                    packet.set_selective_acks([1, 2, 3, 4]);
+
+                    assert_eq!(packet.padding, 0);
+                }
+
+                #[test]
+                fn it_sets_extension_to_selective_ack() {
+                    let mut packet = Packet::default();
+                    assert_eq!(packet.extension(), 0);
+
+                    packet.set_selective_acks([1, 2, 3, 4]);
+
+                    assert_eq!(packet.extension(), EXT_SELECTIVE_ACK);
+                }
+
+                #[test]
+                fn it_doesnt_change_any_of_other_fields() {
+                    let mut packet = Packet::default();
+                    packet.set_connection_id(12_345);
+                    packet.set_timestamp(198_765);
+                    packet.set_timestamp_diff(123);
+                    packet.set_wnd_size(65_000);
+                    packet.set_seq_nr(100);
+                    packet.set_ack_nr(99);
+
+                    packet.set_selective_acks([1, 2, 3, 4]);
+
+                    assert!(packet.connection_id() == 12_345);
+                    assert!(packet.timestamp() == 198_765);
+                    assert!(packet.timestamp_diff() == 123);
+                    assert!(packet.wnd_size() == 65_000);
+                    assert!(packet.seq_nr() == 100);
+                    assert!(packet.ack_nr() == 99);
+                }
             }
         }
     }
