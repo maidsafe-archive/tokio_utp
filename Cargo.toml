@@ -7,7 +7,7 @@ description = "tokio-based uTP implementation"
 documentation = "https://docs.rs/tokio-utp"
 license = "MIT/Apache-2.0"
 name = "tokio-utp"
-repository = "https://github.com/canndrew/tokio-utp"
+repository = "https://github.com/maidsafe/tokio-utp"
 version = "0.3.0"
 
 [dependencies]
