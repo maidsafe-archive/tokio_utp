@@ -282,6 +282,19 @@ mod tests {
 
                 assert_eq!(in_queue.ack_nr, Some(2));
             }
+
+            #[test]
+            fn it_clears_packet_slot() {
+                let mut in_queue = InQueue::new(Some(0));
+                let mut packet = Packet::fin();
+                packet.set_seq_nr(1);
+                assert!(in_queue.push(packet));
+                assert!(!in_queue.packets[1].is_none());
+
+                let _ = in_queue.poll();
+
+                assert!(in_queue.packets[1].is_none());
+            }
         }
 
         mod is_readable {

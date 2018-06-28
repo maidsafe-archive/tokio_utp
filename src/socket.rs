@@ -1323,25 +1323,22 @@ impl Connection {
 
         let now = Instant::now();
         self.update_delays(now, &packet);
+        self.out_queue.set_peer_window(packet.wnd_size());
 
-        if packet.is_ack() {
+        let packet_accepted = if packet.is_ack() {
             self.process_ack(&packet);
+            true
         } else {
             // TODO: validate the packet's ack_nr
 
             // Add the packet to the inbound queue. This handles ordering
             trace!("inqueue -- push packet");
-            if !self.in_queue.push(packet) {
-                // Invalid packet, avoid any further processing
-                trace!("invalid packet");
-                return Ok(false);
-            }
-        }
+            self.in_queue.push(packet)
+        };
 
         // TODO: count duplicate ACK counter
 
         trace!("polling from in_queue");
-
         while let Some(packet) = self.in_queue.poll() {
             self.process_queued(&packet);
         }
@@ -1357,8 +1354,9 @@ impl Connection {
         self.out_queue.set_local_ack(ack_nr, selective_acks);
         self.last_recv_time = Instant::now();
 
-        // Reset the timeout
-        self.reset_timeout();
+        if packet_accepted {
+            self.reset_timeout();
+        }
 
         // Flush out queue
         self.flush(shared)?;
@@ -1376,8 +1374,6 @@ impl Connection {
         // transition a connection into the connected state.
         if self.state == State::SynSent {
             self.in_queue.set_initial_ack_nr(packet.seq_nr());
-            self.out_queue.set_peer_window(packet.wnd_size());
-
             self.state = State::Connected;
         }
         if self.acks_fin_sent(packet) {
@@ -1391,10 +1387,6 @@ impl Connection {
     /// Processes packet that was already queued.
     fn process_queued(&mut self, packet: &Packet) {
         trace!("process; packet={:?}; state={:?}", packet, self.state);
-
-        // Update the peer window size
-        self.out_queue.set_peer_window(packet.wnd_size());
-
         // At this point, we only receive CTL frames. Data is held in the queue
         match packet.ty() {
             packet::Type::Reset => {
