@@ -1,13 +1,10 @@
 [package]
-authors = [
-    "Carl Lerche <me@carllerche.com>",
-    "Andrew Cann <shum@canndrew.org>",
-]
+authors = ["MaidSafe Developers <dev@maidsafe.net>"]
 description = "tokio-based uTP implementation"
 documentation = "https://docs.rs/tokio-utp"
-license = "MIT/Apache-2.0"
+license = "MIT OR BSD-3-Clause"
 name = "tokio-utp"
-repository = "https://github.com/canndrew/tokio-utp"
+repository = "https://github.com/maidsafe/tokio_utp"
 version = "0.3.0"
 
 [dependencies]
