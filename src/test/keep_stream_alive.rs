@@ -104,14 +104,17 @@ fn keep_stream_alive() {
                     .map_err(|(e, _listener_b)| {
                         panic!("accept error: {}", e);
                     })
-                    .and_then(|(stream_b_opt, _listener_b)| {
+                    .and_then(|(stream_b_opt, listener_b)| {
                         let stream_b = unwrap!(stream_b_opt);
                         trace!("accepted connection");
                         tokio_io::io::read_to_end(stream_b, Vec::new())
                             .map_err(|e| {
                                 panic!("read error: {}", e);
                             })
-                            .map(|(_stream_b, recv_data)| recv_data)
+                            .map(|(_stream_b, recv_data)| {
+                                drop(listener_b);
+                                recv_data
+                            })
                     })
             }));
             res.void_unwrap()
