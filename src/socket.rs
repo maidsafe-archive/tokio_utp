@@ -1331,6 +1331,7 @@ impl Connection {
         } else {
             // TODO: validate the packet's ack_nr
 
+            self.out_queue.maybe_resend_ack_for(&packet);
             // Add the packet to the inbound queue. This handles ordering
             trace!("inqueue -- push packet");
             self.in_queue.push(packet)

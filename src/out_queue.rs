@@ -30,6 +30,8 @@ pub struct OutQueue {
     // Peer's window. This is the number of bytes that it has locally but not
     // acked
     peer_window: u32,
+
+    resend_last_ack: bool,
 }
 
 #[derive(Debug)]
@@ -135,6 +137,7 @@ impl OutQueue {
             // Start the max window at the packet size
             max_window: MAX_PACKET_SIZE as u32,
             peer_window: MAX_WINDOW_SIZE as u32,
+            resend_last_ack: false,
         }
     }
 
@@ -218,6 +221,19 @@ impl OutQueue {
             }
         }
         min_rtt.map(|rtt| (acked_bytes, rtt))
+    }
+
+    /// Checks if incoming packet, was already acked before. In such case, force to resend `State`
+    /// packet. That might happen when `State` packets are lost.
+    pub fn maybe_resend_ack_for(&mut self, incoming_packet: &Packet) {
+        let resend = self
+            .state
+            .last_out_ack
+            .map(|last_ack| last_ack >= incoming_packet.seq_nr())
+            .unwrap_or(false);
+        if resend {
+            self.resend_last_ack = true;
+        }
     }
 
     fn recalc_rtt(&mut self, packet_rtt: Duration) {
@@ -338,16 +354,16 @@ impl OutQueue {
             return Some(Next::entry(entry, &mut self.state));
         }
 
-        if self.state.last_in_ack != self.state.last_out_ack {
+        if self.state.last_in_ack != self.state.last_out_ack || self.resend_last_ack {
             trace!(
                 "ack_required; local={:?}; last={:?}; seq_nr={:?}",
                 self.state.last_in_ack,
                 self.state.last_out_ack,
                 self.state.seq_nr
             );
+            self.resend_last_ack = false;
 
             let mut packet = Packet::state();
-
             packet.set_connection_id(self.state.connection_id);
             packet.set_seq_nr(self.state.seq_nr);
             packet.set_timestamp(ts);
