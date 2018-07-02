@@ -210,6 +210,29 @@ fn in_range(ack_nr: u16, seq_nr: u16) -> bool {
 mod tests {
     use super::*;
 
+    mod in_range {
+        use super::*;
+
+        #[test]
+        fn when_ack_nr_is_equal_to_seq_nr_it_returns_false() {
+            assert!(!in_range(5, 5));
+        }
+
+        mod when_ack_nr_less_than_seq_nr {
+            use super::*;
+
+            #[test]
+            fn when_seq_nr_less_than_upper_limit_it_returns_true() {
+                assert!(in_range(4, 5));
+            }
+
+            #[test]
+            fn when_seq_nr_greater_than_upper_limit_it_returns_false() {
+                assert!(!in_range(4, 5 + MAX_DELTA_SEQ as u16));
+            }
+        }
+    }
+
     mod in_queue {
         use super::*;
 

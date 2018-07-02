@@ -1012,8 +1012,15 @@ impl Inner {
         let receive_id = send_id + 1;
         let key = Key { receive_id, addr };
 
-        if self.connection_lookup.contains_key(&key) {
-            // Just ignore the packet...
+        if let Some(&token) = self.connection_lookup.get(&key) {
+            trace!(
+                "connection(id={}) already established, ignoring Syn packet",
+                send_id
+            );
+            // Ack packet anyway
+            let conn = &mut self.connections[token];
+            conn.out_queue.maybe_resend_ack_for(&packet);
+            conn.flush(&mut self.shared)?;
             return Ok(());
         }
 
@@ -1331,6 +1338,7 @@ impl Connection {
         } else {
             // TODO: validate the packet's ack_nr
 
+            self.out_queue.maybe_resend_ack_for(&packet);
             // Add the packet to the inbound queue. This handles ordering
             trace!("inqueue -- push packet");
             self.in_queue.push(packet)

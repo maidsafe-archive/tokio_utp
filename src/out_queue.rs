@@ -30,6 +30,8 @@ pub struct OutQueue {
     // Peer's window. This is the number of bytes that it has locally but not
     // acked
     peer_window: u32,
+
+    resend_last_ack: bool,
 }
 
 #[derive(Debug)]
@@ -39,14 +41,14 @@ struct State {
     // Sequence number for the next packet
     seq_nr: u16,
 
-    // Sequence number of the last locally acked packet (aka, read)
-    local_ack: Option<u16>,
+    // Sequence number of the last locally seen packet which is yet to be acked.
+    last_in_ack: Option<u16>,
 
     // Bitfields indicating whether the next 32 packets have been received
     selective_acks: [u8; 4],
 
     // Last outbound ack
-    last_ack: Option<u16>,
+    last_out_ack: Option<u16>,
 
     // This is the number of bytes available in our inbound receive queue.
     local_window: u32,
@@ -61,13 +63,13 @@ struct State {
 }
 
 impl State {
-    fn new(connection_id: u16, seq_nr: u16, local_ack: Option<u16>) -> Self {
+    fn new(connection_id: u16, seq_nr: u16, last_in_ack: Option<u16>) -> Self {
         State {
             connection_id,
             seq_nr,
-            local_ack,
+            last_in_ack,
             selective_acks: [0; 4],
-            last_ack: None,
+            last_out_ack: None,
             local_window: MAX_WINDOW_SIZE as u32,
             created_at: Instant::now(),
             their_delay: 0,
@@ -126,15 +128,16 @@ const MAX_HEADER_SIZE: usize = 26;
 
 impl OutQueue {
     /// Create a new `OutQueue` with the specified `seq_nr` and `ack_nr`
-    pub fn new(connection_id: u16, seq_nr: u16, local_ack: Option<u16>) -> OutQueue {
+    pub fn new(connection_id: u16, seq_nr: u16, last_in_ack: Option<u16>) -> OutQueue {
         OutQueue {
             packets: VecDeque::new(),
-            state: State::new(connection_id, seq_nr, local_ack),
+            state: State::new(connection_id, seq_nr, last_in_ack),
             rtt: 0,
             rtt_variance: 0,
             // Start the max window at the packet size
             max_window: MAX_PACKET_SIZE as u32,
             peer_window: MAX_WINDOW_SIZE as u32,
+            resend_last_ack: false,
         }
     }
 
@@ -146,7 +149,7 @@ impl OutQueue {
     /// ACKed.
     pub fn is_empty(&self) -> bool {
         // Only empty if all acks have been sent
-        self.packets.is_empty() && self.state.local_ack == self.state.last_ack
+        self.packets.is_empty() && self.state.last_in_ack == self.state.last_out_ack
     }
 
     /// Whenever a packet is received, the included timestamp is passed in here.
@@ -220,6 +223,19 @@ impl OutQueue {
         min_rtt.map(|rtt| (acked_bytes, rtt))
     }
 
+    /// Checks if incoming packet, was already acked before. In such case, force to resend `State`
+    /// packet. That might happen when `State` packets are lost.
+    pub fn maybe_resend_ack_for(&mut self, incoming_packet: &Packet) {
+        let resend = self
+            .state
+            .last_out_ack
+            .map(|last_ack| last_ack >= incoming_packet.seq_nr())
+            .unwrap_or(false);
+        if resend {
+            self.resend_last_ack = true;
+        }
+    }
+
     fn recalc_rtt(&mut self, packet_rtt: Duration) {
         // Use the packet to update rtt & rtt_variance
         let packet_rtt = util::as_ms(packet_rtt);
@@ -246,13 +262,13 @@ impl OutQueue {
         // the remote, *some* sort of state packet needs to be sent out in the
         // near term future.
 
-        if self.state.local_ack.is_none() {
-            // Also update the last_ack as this is the connection's first state
+        if self.state.last_in_ack.is_none() {
+            // Also update the last_out_ack as this is the connection's first state
             // packet which does not need to be acked.
-            self.state.last_ack = Some(val);
+            self.state.last_out_ack = Some(val);
         }
 
-        self.state.local_ack = Some(val);
+        self.state.last_in_ack = Some(val);
         self.state.selective_acks = selective_acks;
     }
 
@@ -264,7 +280,7 @@ impl OutQueue {
         }
 
         // Until a packet is received from the peer, the timeout is 1 second.
-        if self.state.local_ack.is_none() {
+        if self.state.last_in_ack.is_none() {
             return Some(Duration::from_secs(1));
         }
 
@@ -303,7 +319,7 @@ impl OutQueue {
     pub fn next(&mut self) -> Option<Next> {
         let ts = self.timestamp();
         let diff = self.state.their_delay;
-        let ack = self.state.local_ack.unwrap_or(0);
+        let ack = self.state.last_in_ack.unwrap_or(0);
         let selective_acks = self.state.selective_acks;
         let wnd_size = self.state.local_window;
 
@@ -338,16 +354,16 @@ impl OutQueue {
             return Some(Next::entry(entry, &mut self.state));
         }
 
-        if self.state.local_ack != self.state.last_ack {
+        if self.state.last_in_ack != self.state.last_out_ack || self.resend_last_ack {
             trace!(
                 "ack_required; local={:?}; last={:?}; seq_nr={:?}",
-                self.state.local_ack,
-                self.state.last_ack,
+                self.state.last_in_ack,
+                self.state.last_out_ack,
                 self.state.seq_nr
             );
+            self.resend_last_ack = false;
 
             let mut packet = Packet::state();
-
             packet.set_connection_id(self.state.connection_id);
             packet.set_seq_nr(self.state.seq_nr);
             packet.set_timestamp(ts);
@@ -471,6 +487,7 @@ impl<'a> Next<'a> {
         }
     }
 
+    /// Updates last acked packet number.
     pub fn sent(mut self) {
         if let Item::Entry(ref mut e) = self.item {
             // Increment the number of sends
@@ -480,7 +497,7 @@ impl<'a> Next<'a> {
             e.last_sent_at = Some(Instant::now());
         }
 
-        self.state.last_ack = self.state.local_ack;
+        self.state.last_out_ack = self.state.last_in_ack;
     }
 }
 
