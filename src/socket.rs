@@ -612,7 +612,12 @@ impl UtpStream {
     /// Flush all outgoing data on the socket. Returns `Err(WouldBlock)` if there remains data that
     /// could not be immediately written.
     pub fn flush_immutable(&self) -> io::Result<()> {
+        if let Async::NotReady = self.registration.poll_write() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
         if !unwrap!(self.inner.write()).flush(self.token)? {
+            self.registration.need_write();
             return Err(io::ErrorKind::WouldBlock.into());
         }
         Ok(())
@@ -2531,6 +2536,69 @@ mod tests {
 
             for state in closing_states {
                 assert!(!state.is_closed());
+            }
+        }
+    }
+
+    mod utp_stream {
+        use super::*;
+
+        mod flush_immutable {
+            use super::*;
+            use future_utils::{FutureExt, Timeout};
+            use futures::future;
+            use tokio_io;
+
+            #[test]
+            fn when_writes_are_blocked_it_reschedules_current_task_polling_in_the_future() {
+                let mut evloop = unwrap!(Core::new());
+                let handle = evloop.handle();
+                let handle2 = handle.clone();
+
+                let (sock, _) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let (_, listener) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let listener_addr = unwrap!(listener.local_addr());
+
+                let accept_connections = listener
+                    .incoming()
+                    .into_future()
+                    .map_err(|(e, _)| panic!(e))
+                    .and_then(move |(stream, _incoming)| {
+                        let stream = unwrap!(stream);
+                        Timeout::new(Duration::from_secs(1), &handle)
+                            .infallible()
+                            .and_then(move |()| {
+                                // send smth to awake remote socket writes
+                                tokio_io::io::write_all(stream, b"some data")
+                                    .map_err(|e| panic!(e))
+                                    .and_then(|(stream, _)| {
+                                        // keeps stream alive
+                                        tokio_io::io::read_to_end(stream, Vec::new())
+                                    })
+                            })
+                    })
+                    .then(|_| Ok(()));
+                handle2.spawn(accept_connections);
+                let stream =
+                    unwrap!(evloop.run(future::lazy(move || sock.connect(&listener_addr))));
+
+                let mut flush_called = 0;
+                let flush_tx = future::poll_fn(move || {
+                    if flush_called == 0 {
+                        // blocks first flush
+                        stream.registration.need_write();
+                    }
+                    flush_called += 1;
+
+                    match stream.flush_immutable() {
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(Async::NotReady),
+                        Err(e) => Err(e),
+                        Ok(()) => Ok(Async::Ready(flush_called)),
+                    }
+                });
+                let flush_called = unwrap!(evloop.run(flush_tx));
+
+                assert!(flush_called > 1);
             }
         }
     }
