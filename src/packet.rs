@@ -269,6 +269,23 @@ impl Packet {
             }
         }
     }
+
+    /// Checks this packet is acknowledged by given ack information.
+    pub fn acked_by(&self, ack_nr: u16, selective_acks: &[u8]) -> bool {
+        let seq_nr = self.seq_nr();
+        acks_seq_nr(seq_nr, ack_nr, selective_acks)
+    }
+}
+
+pub fn acks_seq_nr(seq_nr: u16, ack_nr: u16, selective_acks: &[u8]) -> bool {
+    ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
+        match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
+            Some(index) => {
+                selective_acks.get(index / 8).cloned().unwrap_or(0) & (1 << (index % 8)) != 0
+            }
+            None => false,
+        }
+    }
 }
 
 impl Default for Packet {
