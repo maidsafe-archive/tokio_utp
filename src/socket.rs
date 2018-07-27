@@ -7,13 +7,15 @@ use {util, TIMESTAMP_MASK};
 //use mio::net::UdpSocket;
 use arraydeque::ArrayDeque;
 use future_utils::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use future_utils::Delay;
 use futures::sync::oneshot;
 use futures::{Async, AsyncSink, Future, Sink, Stream};
 use mio::{Ready, Registration, SetReadiness};
-use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Handle, PollEvented, Remote, Timeout};
-use tokio_io::{AsyncRead, AsyncWrite};
-use void::Void;
+use tokio;
+use tokio::net::UdpSocket;
+use tokio::reactor::PollEvented2;
+use tokio::io::{AsyncRead, AsyncWrite};
+use void::{Void, ResultVoidExt};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use slab::Slab;
@@ -46,7 +48,7 @@ pub struct UtpStream {
     token: usize,
 
     // Mio registration
-    registration: PollEvented<Registration>,
+    registration: PollEvented2<Registration>,
 }
 
 impl fmt::Debug for UtpStream {
@@ -64,7 +66,7 @@ pub struct UtpListener {
     inner: InnerCell,
 
     // Used to register interest in accepting UTP sockets
-    registration: PollEvented<Registration>,
+    registration: PollEvented2<Registration>,
 }
 
 impl fmt::Debug for UtpListener {
@@ -82,7 +84,7 @@ pub struct RawChannel {
     inner: InnerCell,
     peer_addr: SocketAddr,
     bytes_rx: UnboundedReceiver<BytesMut>,
-    registration: PollEvented<Registration>,
+    registration: PollEvented2<Registration>,
 }
 
 // Shared between the UtpSocket and each UtpStream
@@ -90,9 +92,6 @@ struct Inner {
     // State that needs to be passed to `Connection`. This is broken out to make
     // the borrow checker happy.
     shared: Shared,
-
-    // Handle to the event loop.
-    remote: Remote,
 
     // Connection specific state
     connections: Slab<Connection>,
@@ -233,8 +232,8 @@ const MAX_DATA_SIZE: usize = 1_400 - 20;
 
 impl UtpSocket {
     /// Bind a new `UtpSocket` to the given socket address
-    pub fn bind(addr: &SocketAddr, handle: &Handle) -> io::Result<(UtpSocket, UtpListener)> {
-        UdpSocket::bind(addr, handle).and_then(|s| UtpSocket::from_socket(s, handle))
+    pub fn bind(addr: &SocketAddr) -> io::Result<(UtpSocket, UtpListener)> {
+        UdpSocket::bind(addr).and_then(|s| UtpSocket::from_socket(s))
     }
 
     /// Gets the local address that the socket is bound to.
@@ -243,14 +242,14 @@ impl UtpSocket {
     }
 
     /// Create a new `Utpsocket` backed by the provided `UdpSocket`.
-    pub fn from_socket(socket: UdpSocket, handle: &Handle) -> io::Result<(UtpSocket, UtpListener)> {
+    pub fn from_socket(socket: UdpSocket) -> io::Result<(UtpSocket, UtpListener)> {
         let (listener_registration, listener_set_readiness) = Registration::new2();
         let (finalize_tx, finalize_rx) = oneshot::channel();
 
-        let inner = Inner::new_shared(handle, socket, listener_set_readiness);
+        let inner = Inner::new_shared(socket, listener_set_readiness);
         let listener = UtpListener {
             inner: inner.clone(),
-            registration: PollEvented::new(listener_registration, handle)?,
+            registration: PollEvented2::new(listener_registration),
         };
 
         let socket = UtpSocket {
@@ -259,14 +258,14 @@ impl UtpSocket {
         };
 
         let next_tick = Instant::now() + Duration::from_millis(500);
-        let timeout = Timeout::new_at(next_tick, handle)?;
+        let delay = Delay::new(next_tick);
         let refresher = SocketRefresher {
             inner,
             next_tick,
-            timeout,
+            delay,
             req_finalize: finalize_rx,
         };
-        handle.spawn(refresher);
+        tokio::spawn(refresher);
 
         Ok((socket, listener))
     }
@@ -422,20 +421,19 @@ impl Sink for RawChannel {
     type SinkError = io::Error;
 
     fn start_send(&mut self, item: Bytes) -> io::Result<AsyncSink<Bytes>> {
-        match self.registration.poll_write() {
+        match self.registration.poll_write_ready()? {
             Async::NotReady => Ok(AsyncSink::NotReady(item)),
-            Async::Ready(()) => {
+            Async::Ready(_ready) => {
                 let res = {
-                    let inner = unwrap!(self.inner.read());
-                    inner.shared.socket.send_to(&item[..], &self.peer_addr)
+                    let mut inner = unwrap!(self.inner.write());
+                    inner.shared.socket.poll_send_to(&item[..], &self.peer_addr)
                 };
                 match res {
-                    Ok(n) => {
+                    Ok(Async::Ready(n)) => {
                         assert_eq!(n, item.len());
                         Ok(AsyncSink::Ready)
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        self.registration.need_write();
+                    Ok(Async::NotReady) => {
                         Ok(AsyncSink::NotReady(item))
                     }
                     Err(e) => Err(e),
@@ -479,19 +477,12 @@ impl UtpListener {
     ///
     /// This function will also advance the state of all associated connections.
     pub fn accept(&self) -> io::Result<UtpStream> {
-        if let Async::NotReady = self.registration.poll_read() {
+        if let Async::NotReady = self.registration.poll_read_ready(Ready::readable())? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
-        match unwrap!(self.inner.write()).accept() {
-            Err(e) => {
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    self.registration.need_read();
-                }
-                Err(e)
-            }
-            Ok(stream) => Ok(stream),
-        }
+        let stream = unwrap!(self.inner.write()).accept()?;
+        Ok(stream)
     }
 
     /// Convert the `UtpListener` to a stream of incoming connections.
@@ -561,7 +552,7 @@ impl UtpStream {
 
     /// The same as `Read::read` except it does not require a mutable reference to the stream.
     pub fn read_immutable(&self, dst: &mut [u8]) -> io::Result<usize> {
-        if let Async::NotReady = self.registration.poll_read() {
+        if let Async::NotReady = self.registration.poll_read_ready(Ready::readable())? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
@@ -570,7 +561,6 @@ impl UtpStream {
 
         match connection.in_queue.read(dst) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.need_read();
                 if connection.state == State::Connected && connection.read_open() {
                     connection.update_readiness()?;
                     Err(io::ErrorKind::WouldBlock.into())
@@ -589,13 +579,12 @@ impl UtpStream {
 
     /// The same as `Write::write` except it does not require a mutable reference to the stream.
     pub fn write_immutable(&self, src: &[u8]) -> io::Result<usize> {
-        if let Async::NotReady = self.registration.poll_write() {
+        if let Async::NotReady = self.registration.poll_write_ready()? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
         match unwrap!(self.inner.write()).write(self.token, src) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.need_write();
                 Err(io::ErrorKind::WouldBlock.into())
             }
             ret => ret,
@@ -612,12 +601,11 @@ impl UtpStream {
     /// Flush all outgoing data on the socket. Returns `Err(WouldBlock)` if there remains data that
     /// could not be immediately written.
     pub fn flush_immutable(&self) -> io::Result<()> {
-        if let Async::NotReady = self.registration.poll_write() {
+        if let Async::NotReady = self.registration.poll_write_ready()? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
 
         if !unwrap!(self.inner.write()).flush(self.token)? {
-            self.registration.need_write();
             return Err(io::ErrorKind::WouldBlock.into());
         }
         Ok(())
@@ -719,10 +707,9 @@ impl Future for UtpStreamFinalize {
 }
 
 impl Inner {
-    fn new(handle: &Handle, socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
+    fn new(socket: UdpSocket, listener_set_readiness: SetReadiness) -> Inner {
         Inner {
             shared: Shared::new(socket),
-            remote: handle.remote().clone(),
             connections: Slab::new(),
             connection_lookup: HashMap::new(),
             in_buf: BytesMut::with_capacity(DEFAULT_IN_BUFFER_SIZE),
@@ -738,12 +725,10 @@ impl Inner {
     }
 
     fn new_shared(
-        handle: &Handle,
         socket: UdpSocket,
         listener_set_readiness: SetReadiness,
     ) -> InnerCell {
         Arc::new(RwLock::new(Inner::new(
-            handle,
             socket,
             listener_set_readiness,
         )))
@@ -825,12 +810,8 @@ impl Inner {
             send_id += 1;
         }
 
-        let handle = unwrap!(
-            self.remote.handle(),
-            "cannot be used outside of the event loop!"
-        );
         let (registration, set_readiness) = Registration::new2();
-        let registration = PollEvented::new(registration, &handle)?;
+        let registration = PollEvented2::new(registration);
 
         let mut connection = Connection::new_outgoing(key.clone(), set_readiness, send_id);
         connection.flush(&mut self.shared)?;
@@ -882,8 +863,8 @@ impl Inner {
         loop {
             // Try to receive a packet
             let (bytes, addr) = match self.recv_from() {
-                Ok(v) => v,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Ok(Async::Ready(v)) => v,
+                Ok(Async::NotReady) => {
                     trace!("ready -> would block");
                     break;
                 }
@@ -919,11 +900,11 @@ impl Inner {
 
     fn refresh(&mut self, inner: &InnerCell) -> io::Result<Async<bool>> {
         let mut ready = Ready::empty();
-        if let Async::Ready(()) = self.shared.socket.poll_read() {
-            ready |= Ready::readable();
+        if let Async::Ready(r) = self.shared.socket.poll_read_ready(Ready::readable())? {
+            ready |= r;
         }
-        if let Async::Ready(()) = self.shared.socket.poll_write() {
-            ready |= Ready::writable();
+        if let Async::Ready(r) = self.shared.socket.poll_write_ready()? {
+            ready |= r;
         }
         if ready.is_empty() {
             Ok(Async::NotReady)
@@ -1030,12 +1011,8 @@ impl Inner {
             return Ok(());
         }
 
-        let handle = unwrap!(
-            self.remote.handle(),
-            "cannot be used outside of the event loop!"
-        );
         let (registration, set_readiness) = Registration::new2();
-        let registration = PollEvented::new(registration, &handle)?;
+        let registration = PollEvented2::new(registration);
 
         let mut connection =
             Connection::new_incoming(key.clone(), set_readiness, send_id, packet.seq_nr());
@@ -1088,12 +1065,8 @@ impl Inner {
         inner: &InnerCell,
         data: Option<BytesMut>,
     ) -> io::Result<RawChannel> {
-        let handle = unwrap!(
-            self.remote.handle(),
-            "cannot be used outside of the event loop!"
-        );
         let (registration, set_readiness) = Registration::new2();
-        let registration = PollEvented::new(registration, &handle)?;
+        let registration = PollEvented2::new(registration);
         let (tx, rx) = mpsc::unbounded();
         if let Some(data) = data {
             let _ = tx.unbounded_send(data);
@@ -1114,20 +1087,23 @@ impl Inner {
         Ok(ret)
     }
 
-    fn recv_from(&mut self) -> io::Result<(BytesMut, SocketAddr)> {
+    fn recv_from(&mut self) -> io::Result<Async<(BytesMut, SocketAddr)>> {
         // Ensure the buffer has at least 4kb of available space.
         self.in_buf.reserve(MIN_BUFFER_SIZE);
 
         // Read in the bytes
         let addr = unsafe {
-            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+            let (n, addr) = match self.shared.socket.poll_recv_from(self.in_buf.bytes_mut())? {
+                Async::Ready(x) => x,
+                Async::NotReady => return Ok(Async::NotReady),
+            };
             self.in_buf.advance_mut(n);
             addr
         };
 
         let bytes = self.in_buf.take();
 
-        Ok((bytes, addr))
+        Ok(Async::Ready((bytes, addr)))
     }
 
     /// Returns true, if socket is still ready to write.
@@ -1163,12 +1139,12 @@ impl Inner {
     /// Attempts to send enqueued Reset packets.
     fn flush_reset_packets(&mut self) -> Result<Async<()>, io::Error> {
         while let Some((packet, dest_addr)) = self.reset_packets.pop_front() {
-            match self.shared.socket.send_to(packet.as_slice(), &dest_addr) {
-                Ok(n) => {
+            match self.shared.socket.poll_send_to(packet.as_slice(), &dest_addr) {
+                Ok(Async::Ready(n)) => {
                     // should never fail!
                     assert_eq!(n, packet.as_slice().len());
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Ok(Async::NotReady) => {
                     self.shared.need_writable();
                     let _ = self.reset_packets.push_back((packet, dest_addr));
                     return Ok(Async::NotReady);
@@ -1469,16 +1445,16 @@ impl Connection {
             } else {
                 match shared
                     .socket
-                    .send_to(next.packet().as_slice(), &self.key.addr)
+                    .poll_send_to(next.packet().as_slice(), &self.key.addr)
                 {
-                    Ok(n) => {
+                    Ok(Async::Ready(n)) => {
                         assert_eq!(n, next.packet().as_slice().len());
                         next.sent();
 
                         // Reset the connection timeout
                         sent = true;
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    Ok(Async::NotReady) => {
                         shared.need_writable();
                         return Ok(false);
                     }
@@ -1807,12 +1783,12 @@ impl Future for UtpStreamConnect {
     fn poll(&mut self) -> io::Result<Async<UtpStream>> {
         let inner = mem::replace(&mut self.state, UtpStreamConnectState::Empty);
         match inner {
-            UtpStreamConnectState::Waiting(stream) => match stream.registration.poll_write() {
+            UtpStreamConnectState::Waiting(stream) => match stream.registration.poll_write_ready()? {
                 Async::NotReady => {
                     mem::replace(&mut self.state, UtpStreamConnectState::Waiting(stream));
                     Ok(Async::NotReady)
                 }
-                Async::Ready(()) => Ok(Async::Ready(stream)),
+                Async::Ready(_ready) => Ok(Async::Ready(stream)),
             },
             UtpStreamConnectState::Err(e) => Err(e),
             UtpStreamConnectState::Empty => panic!("can't poll UtpStreamConnect twice!"),
@@ -1823,7 +1799,7 @@ impl Future for UtpStreamConnect {
 struct SocketRefresher {
     inner: InnerCell,
     next_tick: Instant,
-    timeout: Timeout,
+    delay: Delay,
     req_finalize: oneshot::Receiver<oneshot::Sender<()>>,
 }
 
@@ -1840,10 +1816,10 @@ impl Future for SocketRefresher {
 
 impl SocketRefresher {
     fn poll_inner(&mut self) -> io::Result<Async<()>> {
-        while let Async::Ready(()) = self.timeout.poll()? {
+        while let Async::Ready(()) = self.delay.poll().void_unwrap() {
             unwrap!(self.inner.write()).tick()?;
             self.next_tick += Duration::from_millis(500);
-            self.timeout.reset(self.next_tick);
+            self.delay.reset(self.next_tick);
         }
 
         if let Async::Ready(true) = unwrap!(self.inner.write()).refresh(&self.inner)? {
@@ -1921,7 +1897,7 @@ impl AsyncWrite for UtpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_core::reactor::Core;
+    use tokio::runtime::Runtime;
 
     /// Reduces boilerplate and creates connection with some specific parameters.
     fn test_connection() -> Connection {
@@ -1940,9 +1916,9 @@ mod tests {
 
         /// Creates new UDP socket and waits for incoming uTP packets.
         /// Returns future that yields received packet and listener address.
-        fn wait_for_packets(handle: &Handle) -> (mpsc::UnboundedReceiver<Packet>, SocketAddr) {
+        fn wait_for_packets() -> (mpsc::UnboundedReceiver<Packet>, SocketAddr) {
             let (packets_tx, packets_rx) = mpsc::unbounded();
-            let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), handle));
+            let listener = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0")));
             let listener_addr = unwrap!(listener.local_addr());
 
             let recv_response =
@@ -1957,18 +1933,17 @@ mod tests {
                     )
                 }).map_err(|e| panic!(e))
                     .then(|_res: Result<(), _>| Ok(()));
-            handle.spawn(recv_response);
+            tokio::spawn(recv_response);
 
             (packets_rx, listener_addr)
         }
 
         /// Reduce some boilerplate.
         /// Returns socket inner with some common defaults.
-        fn make_socket_inner(evloop: &Core) -> InnerCell {
-            let handle = evloop.handle();
+        fn make_socket_inner() -> InnerCell {
             let (_listener_registration, listener_set_readiness) = Registration::new2();
-            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-            Inner::new_shared(&handle, socket, listener_set_readiness)
+            let socket = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0")));
+            Inner::new_shared(socket, listener_set_readiness)
         }
 
         mod process_unknown {
@@ -1976,8 +1951,7 @@ mod tests {
 
             #[test]
             fn when_packet_is_syn_it_schedules_reset_back() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
 
                 let mut packet = Packet::syn();
                 packet.set_connection_id(12_345);
@@ -1994,8 +1968,7 @@ mod tests {
 
             #[test]
             fn when_packet_is_reset_nothing_is_sent_back() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
 
                 let mut packet = Packet::reset();
                 packet.set_connection_id(12_345);
@@ -2013,12 +1986,11 @@ mod tests {
 
             #[test]
             fn it_attempts_to_send_all_queued_reset_packets() {
-                let mut evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let inner = make_socket_inner(&evloop);
+                let mut evloop = unwrap!(Runtime::new());
+                let inner = make_socket_inner();
 
                 let task = future::lazy(|| {
-                    let (packets_rx, remote_peer_addr) = wait_for_packets(&handle);
+                    let (packets_rx, remote_peer_addr) = wait_for_packets();
 
                     let mut packet = Packet::reset();
                     packet.set_connection_id(12_345);
@@ -2039,7 +2011,7 @@ mod tests {
                     future::poll_fn(move || unwrap!(inner.write()).flush_reset_packets())
                         .and_then(move |_| packets_rx.take(2).collect().map_err(|e| panic!(e)))
                 });
-                let packets = unwrap!(evloop.run(task));
+                let packets = unwrap!(evloop.block_on(task));
 
                 let packet_ids: Vec<u16> = packets.iter().map(|p| p.connection_id()).collect();
                 assert_that!(&packet_ids, contains(vec![12_345, 23_456]).exactly());
@@ -2051,8 +2023,7 @@ mod tests {
 
             #[test]
             fn when_listener_is_closed_it_schedules_reset_packet_back() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
                 unwrap!(inner.write()).listener_open = false;
 
                 let mut packet = Packet::syn();
@@ -2074,8 +2045,7 @@ mod tests {
 
             #[test]
             fn it_closes_further_writes() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
                 let mut inner = unwrap!(inner.write());
 
                 let conn = test_connection();
@@ -2090,8 +2060,7 @@ mod tests {
 
             #[test]
             fn when_fin_was_not_sent_yet_it_enqueues_fin_packet() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
                 let mut inner = unwrap!(inner.write());
 
                 let mut conn = test_connection();
@@ -2116,8 +2085,7 @@ mod tests {
 
             #[test]
             fn when_fin_packet_was_sent_it_does_not_enqueue_another() {
-                let evloop = unwrap!(Core::new());
-                let inner = make_socket_inner(&evloop);
+                let inner = make_socket_inner();
                 let mut inner = unwrap!(inner.write());
 
                 let mut conn = test_connection();
@@ -2147,8 +2115,6 @@ mod tests {
 
             #[test]
             fn when_no_data_is_received_within_timeout_it_schedules_reset() {
-                let evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
                 let key = Key {
                     receive_id: 12_345,
                     addr: addr!("1.2.3.4:5000"),
@@ -2157,7 +2123,7 @@ mod tests {
                 let mut conn = Connection::new_outgoing(key, set_readiness, 12_346);
                 // make connection timeout
                 conn.disconnect_timeout_secs = 0;
-                let sock = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0"), &handle));
+                let sock = unwrap!(UdpSocket::bind(&addr!("127.0.0.1:0")));
                 let mut shared = Shared::new(sock);
 
                 let reset_info = unwrap!(conn.tick(&mut shared));
@@ -2547,60 +2513,64 @@ mod tests {
 
         mod flush_immutable {
             use super::*;
-            use future_utils::{FutureExt, Timeout};
+            use future_utils::{FutureExt, Delay};
             use futures::future;
-            use tokio_io;
 
             #[test]
             fn when_writes_are_blocked_it_reschedules_current_task_polling_in_the_future() {
-                let mut evloop = unwrap!(Core::new());
-                let handle = evloop.handle();
-                let handle2 = handle.clone();
+                let mut evloop = unwrap!(Runtime::new());
+                let res = evloop.block_on(future::lazy(move || {
+                    let (sock, _) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0")));
+                    let (_, listener) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0")));
+                    let listener_addr = unwrap!(listener.local_addr());
 
-                let (sock, _) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let (_, listener) = unwrap!(UtpSocket::bind(&addr!("127.0.0.1:0"), &handle));
-                let listener_addr = unwrap!(listener.local_addr());
+                    let accept_connections = listener
+                        .incoming()
+                        .into_future()
+                        .map_err(|(e, _)| panic!(e))
+                        .and_then(move |(stream, _incoming)| {
+                            let stream = unwrap!(stream);
+                            Delay::new(Instant::now() + Duration::from_secs(1))
+                                .infallible()
+                                .and_then(move |()| {
+                                    // send smth to awake remote socket writes
+                                    tokio::io::write_all(stream, b"some data")
+                                        .map_err(|e| panic!(e))
+                                        .and_then(|(stream, _)| {
+                                            // keeps stream alive
+                                            tokio::io::read_to_end(stream, Vec::new())
+                                        })
+                                })
+                        })
+                        .then(|_| Ok(()));
+                    tokio::spawn(accept_connections);
 
-                let accept_connections = listener
-                    .incoming()
-                    .into_future()
-                    .map_err(|(e, _)| panic!(e))
-                    .and_then(move |(stream, _incoming)| {
-                        let stream = unwrap!(stream);
-                        Timeout::new(Duration::from_secs(1), &handle)
-                            .infallible()
-                            .and_then(move |()| {
-                                // send smth to awake remote socket writes
-                                tokio_io::io::write_all(stream, b"some data")
-                                    .map_err(|e| panic!(e))
-                                    .and_then(|(stream, _)| {
-                                        // keeps stream alive
-                                        tokio_io::io::read_to_end(stream, Vec::new())
-                                    })
-                            })
-                    })
-                    .then(|_| Ok(()));
-                handle2.spawn(accept_connections);
-                let stream =
-                    unwrap!(evloop.run(future::lazy(move || sock.connect(&listener_addr))));
+                    sock
+                        .connect(&listener_addr)
+                        .map_err(|e| panic!("error connecting: {}", e))
+                        .and_then(|stream| {
+                            let mut flush_called = 0;
+                            let flush_tx = future::poll_fn(move || {
+                                if flush_called == 0 {
+                                    // blocks first flush
+                                    unwrap!(stream.registration.clear_write_ready());
+                                }
+                                flush_called += 1;
 
-                let mut flush_called = 0;
-                let flush_tx = future::poll_fn(move || {
-                    if flush_called == 0 {
-                        // blocks first flush
-                        stream.registration.need_write();
-                    }
-                    flush_called += 1;
+                                match stream.flush_immutable() {
+                                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(Async::NotReady),
+                                    Err(e) => panic!("error flushing: {}", e),
+                                    Ok(()) => Ok(Async::Ready(flush_called)),
+                                }
+                            });
 
-                    match stream.flush_immutable() {
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(Async::NotReady),
-                        Err(e) => Err(e),
-                        Ok(()) => Ok(Async::Ready(flush_called)),
-                    }
-                });
-                let flush_called = unwrap!(evloop.run(flush_tx));
-
-                assert!(flush_called > 1);
+                            flush_tx
+                                .map(|flush_called| {
+                                    assert!(flush_called > 1);
+                                })
+                        })
+                }));
+                res.void_unwrap()
             }
         }
     }

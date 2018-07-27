@@ -13,8 +13,7 @@ extern crate net_literals;
 extern crate rand;
 extern crate slab;
 extern crate smallvec;
-extern crate tokio_core;
-extern crate tokio_io;
+extern crate tokio;
 extern crate void;
 
 #[macro_use]
