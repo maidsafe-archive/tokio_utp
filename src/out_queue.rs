@@ -12,6 +12,8 @@ use std::{cmp, io};
 // * Nagle check, don't flush the last data packet if there is in-flight data
 //   and it is too small.
 
+const FIN_RESENDS: u32 = 5;
+
 #[derive(Debug)]
 pub struct OutQueue {
     // queued packets
@@ -98,15 +100,7 @@ impl Entry {
 
     /// Checks this packet entry is acknowledged by given ack information.
     fn acked_by(&self, ack_nr: u16, selective_acks: &[u8]) -> bool {
-        let seq_nr = self.packet.seq_nr();
-        ack_nr.wrapping_sub(seq_nr) <= seq_nr.wrapping_sub(ack_nr) || {
-            match (seq_nr.wrapping_sub(ack_nr) as usize).checked_sub(2) {
-                Some(index) => {
-                    selective_acks.get(index / 8).cloned().unwrap_or(0) & (1 << (index % 8)) != 0
-                }
-                None => false,
-            }
-        }
+        self.packet.acked_by(ack_nr, selective_acks)
     }
 }
 
@@ -498,6 +492,13 @@ impl<'a> Next<'a> {
         }
 
         self.state.last_out_ack = self.state.last_in_ack;
+    }
+
+    pub fn fin_resend_limit_reached(&self) -> bool {
+        match self.item {
+            Item::Entry(ref e) => e.packet.ty() == packet::Type::Fin && e.num_sends >= FIN_RESENDS,
+            Item::State(..) => false,
+        }
     }
 }
 

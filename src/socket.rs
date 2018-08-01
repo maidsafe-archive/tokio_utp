@@ -956,6 +956,7 @@ impl Inner {
             Ok(packet) => packet,
             Err(bytes) => return self.process_raw(bytes, addr, inner),
         };
+        trace!("recv_from; addr={:?}; packet={:?}", addr, packet);
         // Process the packet
         match packet.ty() {
             packet::Type::Syn => {
@@ -1007,12 +1008,6 @@ impl Inner {
         addr: SocketAddr,
         inner: &InnerCell,
     ) -> io::Result<()> {
-        if !self.listener_open || self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
-            debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
-            self.schedule_reset(packet.connection_id(), addr);
-            return Ok(());
-        }
-
         let send_id = packet.connection_id();
         let receive_id = send_id + 1;
         let key = Key { receive_id, addr };
@@ -1026,6 +1021,12 @@ impl Inner {
             let conn = &mut self.connections[token];
             conn.out_queue.maybe_resend_ack_for(&packet);
             conn.flush(&mut self.shared)?;
+            return Ok(());
+        }
+
+        if !self.listener_open || self.connections.len() >= MAX_CONNECTIONS_PER_SOCKET {
+            debug_assert!(self.connections.len() <= MAX_CONNECTIONS_PER_SOCKET);
+            self.schedule_reset(packet.connection_id(), addr);
             return Ok(());
         }
 
@@ -1337,6 +1338,7 @@ impl Connection {
         self.update_delays(now, &packet);
         self.out_queue.set_peer_window(packet.wnd_size());
 
+        self.check_acks_fin_sent(&packet);
         let packet_accepted = if packet.is_ack() {
             self.process_ack(&packet);
             true
@@ -1380,6 +1382,15 @@ impl Connection {
         Ok(self.is_finalized())
     }
 
+    fn check_acks_fin_sent(&mut self, packet: &Packet) {
+        if self.acks_fin_sent(&packet) {
+            self.fin_sent_acked = true;
+            if self.fin_received.is_some() {
+                self.notify_conn_closed();
+            }
+        }
+    }
+
     /// Handles `State` packets.
     fn process_ack(&mut self, packet: &Packet) {
         // State packets are special, they do not have an associated sequence number, thus do not
@@ -1388,12 +1399,6 @@ impl Connection {
         if self.state == State::SynSent {
             self.in_queue.set_initial_ack_nr(packet.seq_nr());
             self.state = State::Connected;
-        }
-        if self.acks_fin_sent(packet) {
-            self.fin_sent_acked = true;
-            if self.fin_received.is_some() {
-                self.notify_conn_closed();
-            }
         }
     }
 
@@ -1414,9 +1419,9 @@ impl Connection {
 
     /// Checks if given packet acks Fin we sent.
     fn acks_fin_sent(&self, packet: &Packet) -> bool {
-        debug_assert!(packet.is_ack());
-        self.fin_sent
-            .map_or(false, |seq_nr| seq_nr == packet.ack_nr())
+        self.fin_sent.map_or(false, |seq_nr| {
+            packet::acks_seq_nr(seq_nr, packet.ack_nr(), &packet.selective_acks())
+        })
     }
 
     /// Returns true, if socket is still ready to write.
@@ -1439,11 +1444,12 @@ impl Connection {
             );
 
             // this packet acks Fin we received before.
-            if next.packet().is_ack()
+            if (next.packet().is_ack()
                 && self
                     .fin_received
                     .map_or(false, |seq_nr| seq_nr == next.packet().ack_nr())
-                && self.fin_sent_acked
+                && self.fin_sent_acked)
+                || (self.fin_received.is_some() && next.fin_resend_limit_reached())
             {
                 if let Some(closed_tx) = self.closed_tx.take() {
                     let _ = closed_tx.send(());
@@ -2451,38 +2457,34 @@ mod tests {
             }
         }
 
-        mod process_ack {
+        mod check_acks_fin_sent {
             use super::*;
 
-            mod when_packet_acks_our_fin_packet {
-                use super::*;
+            #[test]
+            fn it_notes_that_our_fin_was_acked() {
+                let mut conn = test_connection();
+                conn.fin_sent = Some(5);
+                assert!(!conn.fin_sent_acked);
 
-                #[test]
-                fn it_notes_that_our_fin_was_acked() {
-                    let mut conn = test_connection();
-                    conn.fin_sent = Some(5);
-                    assert!(!conn.fin_sent_acked);
+                let mut packet = Packet::state();
+                packet.set_ack_nr(5);
+                conn.check_acks_fin_sent(&packet);
 
-                    let mut packet = Packet::state();
-                    packet.set_ack_nr(5);
-                    conn.process_ack(&packet);
+                assert!(conn.fin_sent_acked);
+            }
 
-                    assert!(conn.fin_sent_acked);
-                }
+            #[test]
+            fn when_fin_was_received_connection_state_is_changed_to_closed() {
+                let mut conn = test_connection();
+                conn.fin_sent = Some(5);
+                conn.fin_received = Some(123);
+                assert!(!conn.fin_sent_acked);
 
-                #[test]
-                fn when_fin_was_received_connection_state_is_changed_to_closed() {
-                    let mut conn = test_connection();
-                    conn.fin_sent = Some(5);
-                    conn.fin_received = Some(123);
-                    assert!(!conn.fin_sent_acked);
+                let mut packet = Packet::state();
+                packet.set_ack_nr(5);
+                conn.check_acks_fin_sent(&packet);
 
-                    let mut packet = Packet::state();
-                    packet.set_ack_nr(5);
-                    conn.process_ack(&packet);
-
-                    assert_eq!(conn.state, State::Closed);
-                }
+                assert_eq!(conn.state, State::Closed);
             }
         }
 
