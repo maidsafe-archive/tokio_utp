@@ -427,7 +427,7 @@ impl Sink for RawChannel {
             Async::Ready(()) => {
                 let res = {
                     let inner = unwrap!(self.inner.read());
-                    inner.shared.socket.send_to(&item[..], &self.peer_addr)
+                    inner.shared.send_to(&item[..], &self.peer_addr)
                 };
                 match res {
                     Ok(n) => {
@@ -1120,7 +1120,7 @@ impl Inner {
 
         // Read in the bytes
         let addr = unsafe {
-            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+            let (n, addr) = self.shared.recv_from(self.in_buf.bytes_mut())?;
             self.in_buf.advance_mut(n);
             addr
         };
@@ -1163,7 +1163,7 @@ impl Inner {
     /// Attempts to send enqueued Reset packets.
     fn flush_reset_packets(&mut self) -> Result<Async<()>, io::Error> {
         while let Some((packet, dest_addr)) = self.reset_packets.pop_front() {
-            match self.shared.socket.send_to(packet.as_slice(), &dest_addr) {
+            match self.shared.send_to(packet.as_slice(), &dest_addr) {
                 Ok(n) => {
                     // should never fail!
                     assert_eq!(n, packet.as_slice().len());
@@ -1216,6 +1216,14 @@ impl Shared {
 
     fn need_writable(&mut self) {
         self.ready.remove(Ready::writable());
+    }
+
+    fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        self.socket.send_to(buf, target)
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf)
     }
 }
 
@@ -1468,7 +1476,6 @@ impl Connection {
                 sent = true;
             } else {
                 match shared
-                    .socket
                     .send_to(next.packet().as_slice(), &self.key.addr)
                 {
                     Ok(n) => {
