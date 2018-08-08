@@ -16,6 +16,9 @@ futures = "0.1.16"
 log = "0.3.7"
 mio = "0.6.9"
 net-literals = "0.1.2"
+# TODO(povilas): need to update libc in netsim so that we could use latest
+# version V
+nix = "0.10.0"
 rand = "0.4"
 slab = "0.4.0"
 smallvec = "0.4"

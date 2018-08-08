@@ -7,6 +7,8 @@ extern crate futures;
 #[macro_use]
 extern crate hamcrest;
 extern crate mio;
+#[cfg(unix)]
+extern crate nix;
 #[cfg(test)]
 #[macro_use]
 extern crate net_literals;

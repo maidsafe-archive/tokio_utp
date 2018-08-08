@@ -6,20 +6,23 @@ use {util, TIMESTAMP_MASK};
 
 //use mio::net::UdpSocket;
 use arraydeque::ArrayDeque;
+use bytes::{BufMut, Bytes, BytesMut};
 use future_utils::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::sync::oneshot;
 use futures::{Async, AsyncSink, Future, Sink, Stream};
 use mio::{Ready, Registration, SetReadiness};
+#[cfg(unix)]
+use nix::sys::socket::{getpeername, SockAddr};
+use slab::Slab;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented, Remote, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
 use void::Void;
 
-use bytes::{BufMut, Bytes, BytesMut};
-use slab::Slab;
-
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{cmp, fmt, io, mem, u32};
@@ -427,7 +430,7 @@ impl Sink for RawChannel {
             Async::Ready(()) => {
                 let res = {
                     let inner = unwrap!(self.inner.read());
-                    inner.shared.socket.send_to(&item[..], &self.peer_addr)
+                    inner.shared.send_to(&item[..], &self.peer_addr)
                 };
                 match res {
                     Ok(n) => {
@@ -1120,7 +1123,7 @@ impl Inner {
 
         // Read in the bytes
         let addr = unsafe {
-            let (n, addr) = self.shared.socket.recv_from(self.in_buf.bytes_mut())?;
+            let (n, addr) = self.shared.recv_from(self.in_buf.bytes_mut())?;
             self.in_buf.advance_mut(n);
             addr
         };
@@ -1163,7 +1166,7 @@ impl Inner {
     /// Attempts to send enqueued Reset packets.
     fn flush_reset_packets(&mut self) -> Result<Async<()>, io::Error> {
         while let Some((packet, dest_addr)) = self.reset_packets.pop_front() {
-            match self.shared.socket.send_to(packet.as_slice(), &dest_addr) {
+            match self.shared.send_to(packet.as_slice(), &dest_addr) {
                 Ok(n) => {
                     // should never fail!
                     assert_eq!(n, packet.as_slice().len());
@@ -1216,6 +1219,50 @@ impl Shared {
 
     fn need_writable(&mut self) {
         self.ready.remove(Ready::writable());
+    }
+
+    fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        if self.connected_peer_addr().is_none() {
+            self.socket.send_to(buf, target)
+        } else {
+            self.socket.send(buf)
+        }
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        if let Some(peer_addr) = self.connected_peer_addr() {
+            self.socket
+                .recv(buf)
+                .map(|bytes_received| (bytes_received, peer_addr))
+        } else {
+            self.socket.recv_from(buf)
+        }
+    }
+
+    /// If UDP socket was connected, return peer address.
+    /// On Windows always returns `None`, cause Windows allows to use `send_to/recv_from` on
+    /// connected UDP sockets.
+    fn connected_peer_addr(&self) -> Option<SocketAddr> {
+        #[cfg(unix)]
+        {
+            // NOTE, `peer_addr()` might be implemented for `UdpSocket` in the future.
+            // then getpeername() could be removed
+            let res = getpeername(self.socket.as_raw_fd());
+            match res {
+                Ok(addr) => {
+                    if let SockAddr::Inet(addr) = addr {
+                        Some(addr.to_std())
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 
@@ -1467,10 +1514,7 @@ impl Connection {
                 next.sent();
                 sent = true;
             } else {
-                match shared
-                    .socket
-                    .send_to(next.packet().as_slice(), &self.key.addr)
-                {
+                match shared.send_to(next.packet().as_slice(), &self.key.addr) {
                     Ok(n) => {
                         assert_eq!(n, next.packet().as_slice().len());
                         next.sent();
