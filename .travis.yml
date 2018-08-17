@@ -2,8 +2,8 @@ env:
   global:
     - RUST_BACKTRACE=1
     - PATH=$PATH:$HOME/.cargo/bin
-    - RUST_STABLE=1.26.2
-    - RUST_NIGHTLY=nightly-2018-06-10
+    - RUST_STABLE=1.27.2
+    - RUST_NIGHTLY=nightly-2018-07-19
     - RUST_RUSTFMT=0.8.2
     - RUST_CLIPPY=0.0.207
 os:
@@ -11,8 +11,8 @@ os:
   - osx
 language: rust
 rust:
-  - 1.26.2
-  - nightly-2018-06-10
+  - 1.27.2
+  - nightly-2018-07-19
 sudo: false
 cache:
   cargo: true
