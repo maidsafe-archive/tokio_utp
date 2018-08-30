@@ -26,8 +26,7 @@ fn it_receives_data_after_write_shutdown() {
             future::empty::<(), _>()
                 .with_timeout(Duration::from_secs(2), &handle2)
                 .and_then(move |_| tokio_io::io::write_all(stream, vec![1, 2, 3, 4]))
-        })
-        .then(|_| Ok(()));
+        }).then(|_| Ok(()));
     handle.spawn(accept_connections);
 
     let res = evloop.run(future::lazy(|| {
@@ -57,8 +56,7 @@ fn when_fin_is_received_read_returns_0_bytes_read() {
         .and_then(move |(stream, _incoming)| {
             let stream = unwrap!(stream);
             tokio_io::io::shutdown(stream)
-        })
-        .then(|_| Ok(()));
+        }).then(|_| Ok(()));
     handle.spawn(accept_connections);
 
     let mut data = vec![0; 64];
@@ -92,8 +90,7 @@ mod finalize {
             .and_then(move |(stream, _incoming)| {
                 let stream = unwrap!(stream);
                 tokio_io::io::shutdown(stream).and_then(|stream| stream.finalize().infallible())
-            })
-            .then(|_| Ok(()));
+            }).then(|_| Ok(()));
         handle.spawn(accept_connections);
 
         let res = evloop.run(future::lazy(move || {
@@ -121,8 +118,7 @@ mod finalize {
             .and_then(move |(stream, _incoming)| {
                 let stream = unwrap!(stream);
                 tokio_io::io::shutdown(stream).and_then(|stream| stream.finalize().infallible())
-            })
-            .then(|_| Ok(()));
+            }).then(|_| Ok(()));
         handle.spawn(accept_connections);
 
         let res = evloop.run(future::lazy(move || {

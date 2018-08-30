@@ -30,8 +30,7 @@ pub fn main() {
             .for_each(|stream| {
                 let (reader, writer) = stream.split();
                 tokio_io::io::copy(reader, writer).map(|_| ())
-            })
-            .then(|res| {
+            }).then(|res| {
                 unwrap!(res);
                 Ok(())
             })

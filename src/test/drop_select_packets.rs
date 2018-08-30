@@ -70,8 +70,7 @@ fn drop_selected_packet(n: u32, sender: bool) {
                     .ipv4_addr(ip_client, 0)
                     .ipv4_route(Ipv4Route::new(Ipv4Range::global(), None)),
                 plug_client,
-            )
-            .spawn(&network_handle, move || {
+            ).spawn(&network_handle, move || {
                 let mut core = unwrap!(Core::new());
                 let handle = core.handle();
                 let (socket_client, _) = unwrap!(UtpSocket::bind(&addr!("0.0.0.0:0"), &handle));
@@ -81,21 +80,17 @@ fn drop_selected_packet(n: u32, sender: bool) {
                         .connect(&their_addr)
                         .map_err(|e| {
                             panic!("connect error: {}", e);
-                        })
-                        .and_then(|stream_client| {
+                        }).and_then(|stream_client| {
                             tokio_io::io::write_all(stream_client, b"ping")
                                 .map_err(|e| panic!("write error: {}", e))
-                        })
-                        .and_then(|(stream_client, _bytes)| {
+                        }).and_then(|(stream_client, _bytes)| {
                             tokio_io::io::read_to_end(stream_client, Vec::new())
                                 .map_err(|e| panic!("read error: {}", e))
-                        })
-                        .and_then(|(stream_client, bytes)| {
+                        }).and_then(|(stream_client, bytes)| {
                             assert_eq!(&bytes[..], b"pong");
                             tokio_io::io::shutdown(stream_client)
                                 .map_err(|e| panic!("error shuting down: {}", e))
-                        })
-                        .and_then(|stream_client| stream_client.finalize().infallible())
+                        }).and_then(|stream_client| stream_client.finalize().infallible())
                 }));
                 res.void_unwrap()
             });
@@ -107,8 +102,7 @@ fn drop_selected_packet(n: u32, sender: bool) {
                     .ipv4_addr(ip_server, 0)
                     .ipv4_route(Ipv4Route::new(Ipv4Range::global(), None)),
                 plug_server,
-            )
-            .spawn(&network_handle, move || {
+            ).spawn(&network_handle, move || {
                 let mut core = unwrap!(Core::new());
                 let handle = core.handle();
 
@@ -123,22 +117,18 @@ fn drop_selected_packet(n: u32, sender: bool) {
                         .into_future()
                         .map_err(|(e, _listener_server)| {
                             panic!("accept error: {}", e);
-                        })
-                        .and_then(|(stream_b_opt, _listener_server)| {
+                        }).and_then(|(stream_b_opt, _listener_server)| {
                             let stream_server = unwrap!(stream_b_opt);
                             tokio_io::io::read_exact(stream_server, [0u8; 4])
                                 .map_err(|e| panic!("read error: {}", e))
-                        })
-                        .and_then(|(stream_server, bytes)| {
+                        }).and_then(|(stream_server, bytes)| {
                             assert_eq!(&bytes, b"ping");
                             tokio_io::io::write_all(stream_server, b"pong")
                                 .map_err(|e| panic!("write error: {}", e))
-                        })
-                        .and_then(|(stream_server, _bytes)| {
+                        }).and_then(|(stream_server, _bytes)| {
                             tokio_io::io::shutdown(stream_server)
                                 .map_err(|e| panic!("error shuting down: {}", e))
-                        })
-                        .and_then(|stream_server| stream_server.finalize().infallible())
+                        }).and_then(|stream_server| stream_server.finalize().infallible())
                 }));
                 res.void_unwrap()
             });

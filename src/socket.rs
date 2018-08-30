@@ -2000,7 +2000,7 @@ mod tests {
                         },
                     )
                 }).map_err(|e| panic!(e))
-                    .then(|_res: Result<(), _>| Ok(()));
+                .then(|_res: Result<(), _>| Ok(()));
             handle.spawn(recv_response);
 
             (packets_rx, listener_addr)
@@ -2622,8 +2622,7 @@ mod tests {
                                         tokio_io::io::read_to_end(stream, Vec::new())
                                     })
                             })
-                    })
-                    .then(|_| Ok(()));
+                    }).then(|_| Ok(()));
                 handle2.spawn(accept_connections);
                 let stream =
                     unwrap!(evloop.run(future::lazy(move || sock.connect(&listener_addr))));
