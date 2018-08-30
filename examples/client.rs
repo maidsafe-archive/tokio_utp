@@ -43,8 +43,7 @@ pub fn main() {
                         })
                     })
                 })
-            })
-            .then(|res| {
+            }).then(|res| {
                 unwrap!(res);
                 Ok(())
             })
